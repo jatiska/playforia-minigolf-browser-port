@@ -402,9 +402,15 @@ export class GolfGame extends Game {
      */
     protected getStrokeLookaheadTicks(): number {
         if (this.collision !== COLLISION_YES) return 0;
+        // Use peakPingMs (max over recent samples) rather than avgPingMs
+        // so the lookahead absorbs jitter, not just the steady-state RTT.
+        // A 1ms-mean / 25ms-spike connection deserves the 25ms lookahead -
+        // otherwise the spike puts the broadcast on the "in the past" side
+        // of apply_tick on the unlucky client, the impulse applies late,
+        // and peer ball positions diverge for the rest of the stroke.
         let maxPingMs = 0;
         for (const p of this.players) {
-            const ping = p.connection.avgPingMs;
+            const ping = p.connection.peakPingMs;
             if (ping > maxPingMs) maxPingMs = ping;
         }
         const ticks = Math.ceil((maxPingMs + LOOKAHEAD_SAFETY_MS) / PHYSICS_STEP_MS);
@@ -500,8 +506,16 @@ export class GolfGame extends Game {
         // ticks (24 ms) - barely perceptible. Remove once enough flight
         // time tells us the math is right.
         if (this.collision === COLLISION_YES) {
+            // Show both avg (steady-state) and peak (jitter) per player so a
+            // log line tells us "this stroke chose lookahead X because peak
+            // ping was Y" without having to recompute from samples.
             const pings = this.players
-                .map((pl) => `${pl.id}=${pl.connection.avgPingMs.toFixed(1)}ms`)
+                .map(
+                    (pl) =>
+                        `${pl.id}=avg${pl.connection.avgPingMs.toFixed(1)}/peak${pl.connection.peakPingMs.toFixed(
+                            1,
+                        )}ms`,
+                )
                 .join(" ");
             console.log(
                 `[lookahead] game=${this.gameId} stroke=${this.strokeSeedCounter} ` +
