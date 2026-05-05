@@ -278,15 +278,17 @@ deterministic across clients, the port adds a shared world-tick clock:
   ping offsets cancel out in the math).
 
 - **apply_tick** (per stroke) is `(server_elapsedMs / 6) + lookahead_ticks`.
-  The lookahead is paid only when krokkaus can actually engage -
-  multi-player rooms with `collision: 1` use 30 ticks (≈180 ms); single-
-  player and collision-off rooms use 0 (no peer to be deterministic *with*,
-  so apply on the next tick after broadcast - feels as snappy as the
-  network round-trip allows). Every client buffers the impulse and applies
-  it when its local `worldTick` reaches `apply_tick`. The shooter and every
-  watcher land on the same iteration, so peer ball positions match at the
-  moment of overlap and the per-substep krokkaus check produces identical
-  results.
+  The lookahead is **adaptive**: the server picks
+  `ceil((max_player_ping_ms + 20) / 6)` clamped to `[3, 60]` ticks for
+  multi-player rooms with `collision: 1`, and 0 for single-player or
+  collision-off rooms. Each connection's `avgPingMs` is an EWMA over RTTs
+  measured from server-initiated `c ping`/`c pong` exchanges every 3 s,
+  so a LAN lobby gets ~18 ms of input lag while a 200 ms-ping lobby
+  tolerates ~220 ms - input lag tracks actual connection quality.
+  Every client buffers the impulse and applies it when its local
+  `worldTick` reaches `apply_tick`. The shooter and every watcher land
+  on the same iteration, so peer ball positions match at the moment of
+  overlap and the per-substep krokkaus check produces identical results.
 
 - **Catchup**: clients advance `worldTick` clock-based regardless of whether
   any ball is moving (the per-ball `step()` is still gated on motion). A tab
@@ -299,8 +301,11 @@ deterministic across clients, the port adds a shared world-tick clock:
   (180 ms) are the primary trigger.
 
 The single-source-of-truth for the constants is `port/server/src/game.ts`:
-`PHYSICS_STEP_MS = 6`, `STROKE_LOOKAHEAD_TICKS = 30`. The web client's
-`port/web/src/game/physics.ts` exports the same `PHYSICS_STEP_MS`.
+`PHYSICS_STEP_MS = 6`, `LOOKAHEAD_SAFETY_MS = 20`, `MIN_LOOKAHEAD_TICKS = 3`,
+`MAX_LOOKAHEAD_TICKS = 60`. The web client's `port/web/src/game/physics.ts`
+exports the same `PHYSICS_STEP_MS`. Per-connection ping is in
+`port/server/src/connection.ts` (`Connection.avgPingMs`, sampled every
+`RTT_PROBE_INTERVAL_MS = 3000` via the existing `c ping`/`c pong` flow).
 
 ## Live aim preview (cursor stream - port-specific)
 

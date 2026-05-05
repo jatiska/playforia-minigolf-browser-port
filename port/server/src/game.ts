@@ -33,13 +33,24 @@ export const PERM_VIP = 2;
 export const PHYSICS_STEP_MS = 6;
 
 /**
- * Default ticks of lookahead added to a stroke's `apply_tick`. The shooter
- * (and every watcher) waits this many world ticks after the broadcast before
- * applying the impulse, so all clients land on the same world tick regardless
- * of ping jitter. 30 ticks = 180ms - covers typical WebSocket jitter without
- * adding obvious input lag. Krokkaus correctness depends on it.
+ * Adaptive `apply_tick` lookahead constants. Lookahead is what makes
+ * cross-client krokkaus collisions deterministic under ping jitter, but it
+ * also adds visible input lag - so we size it to the worst-pinged player in
+ * the room rather than picking a one-size-fits-all default.
+ *
+ * Formula (in `GolfGame.getStrokeLookaheadTicks`):
+ *   ms = max(player.connection.avgPingMs over players in this room) + LOOKAHEAD_SAFETY_MS
+ *   ticks = ceil(ms / PHYSICS_STEP_MS)
+ *   clamp(ticks, [MIN_LOOKAHEAD_TICKS, MAX_LOOKAHEAD_TICKS])
+ *
+ * The `+SAFETY_MS` covers natural WAN jitter on top of the steady-state RTT.
+ * The min keeps a couple of ticks even on a perfect-LAN room (so first-stroke
+ * tail-of-jitter doesn't slip through). The max caps the worst-case input
+ * lag - beyond ~360ms a player's connection is too laggy to play either way.
  */
-export const STROKE_LOOKAHEAD_TICKS = 30;
+export const LOOKAHEAD_SAFETY_MS = 20;
+export const MIN_LOOKAHEAD_TICKS = 3;
+export const MAX_LOOKAHEAD_TICKS = 60;
 
 export abstract class Game {
     protected players: Player[] = [];
@@ -376,17 +387,30 @@ export class GolfGame extends Game {
      * Ticks of lookahead added to `apply_tick`. The lookahead is what makes
      * cross-client krokkaus collisions deterministic under ping jitter -
      * every client buffers the impulse and applies it at the same world
-     * tick - but it adds visible input lag (~lookahead × 6 ms). We pay
-     * that cost ONLY when krokkaus can actually engage:
+     * tick - but it adds visible input lag (~lookahead × 6 ms). We size it
+     * to the WORST-pinged player in the room (their ping + safety) so a
+     * LAN lobby gets snappy strokes (~3 ticks ≈ 18 ms) while a high-RTT
+     * lobby still tolerates the jitter on its slowest connection.
      *
-     *   - `collision: 1` AND a peer who could realistically be hit.
-     *   - Single-player has no peer, so the cost is dead weight - subclasses
-     *     override to 0 (see `TrainingGame`).
-     *   - `collision: 0` games (daily, multi-collision-off) skip it: each
-     *     ball is independent, no inter-ball deterministic gate needed.
+     *   - `collision: 0` games skip it (each ball independent). Returns 0.
+     *   - Single-player has no peer; `TrainingGame` overrides to 0.
+     *   - `collision: 1` games: `ceil((maxPing + SAFETY_MS) / 6)` clamped to
+     *     `[MIN_LOOKAHEAD_TICKS, MAX_LOOKAHEAD_TICKS]`.
+     *
+     * Recomputed per-stroke so a player's improving (or degrading) ping
+     * during a session is reflected in the very next stroke they take.
      */
     protected getStrokeLookaheadTicks(): number {
-        return this.collision === COLLISION_YES ? STROKE_LOOKAHEAD_TICKS : 0;
+        if (this.collision !== COLLISION_YES) return 0;
+        let maxPingMs = 0;
+        for (const p of this.players) {
+            const ping = p.connection.avgPingMs;
+            if (ping > maxPingMs) maxPingMs = ping;
+        }
+        const ticks = Math.ceil((maxPingMs + LOOKAHEAD_SAFETY_MS) / PHYSICS_STEP_MS);
+        if (ticks < MIN_LOOKAHEAD_TICKS) return MIN_LOOKAHEAD_TICKS;
+        if (ticks > MAX_LOOKAHEAD_TICKS) return MAX_LOOKAHEAD_TICKS;
+        return ticks;
     }
 
     /**
