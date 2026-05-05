@@ -491,8 +491,24 @@ export class GolfGame extends Game {
         // 32-bit composite - distinct per (game, stroke) so all clients pick
         // up a fresh independent random stream.
         const seed = ((this.gameId & 0xffff) << 16) | (this.strokeSeedCounter & 0xffff);
-        const applyTick =
-            ((this.trackElapsedMs() / PHYSICS_STEP_MS) | 0) + this.getStrokeLookaheadTicks();
+        const lookahead = this.getStrokeLookaheadTicks();
+        const elapsedTick = (this.trackElapsedMs() / PHYSICS_STEP_MS) | 0;
+        const applyTick = elapsedTick + lookahead;
+        // Diagnostic so you can verify adaptive lookahead is active. Shows
+        // each player's measured RTT (avgPingMs) and the lookahead the
+        // server picked for THIS stroke. Localhost play converges to ~4
+        // ticks (24 ms) - barely perceptible. Remove once enough flight
+        // time tells us the math is right.
+        if (this.collision === COLLISION_YES) {
+            const pings = this.players
+                .map((pl) => `${pl.id}=${pl.connection.avgPingMs.toFixed(1)}ms`)
+                .join(" ");
+            console.log(
+                `[lookahead] game=${this.gameId} stroke=${this.strokeSeedCounter} ` +
+                    `pid=${playerId} pings=[${pings}] lookahead=${lookahead}t (` +
+                    `${(lookahead * PHYSICS_STEP_MS).toFixed(0)}ms) apply_tick=${applyTick}`,
+            );
+        }
         this.writeAll(
             tabularize("game", "beginstroke", playerId, ballCoords, mouseCoords, seed, applyTick),
         );
