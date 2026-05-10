@@ -58,12 +58,25 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
 let knownLogs: string[] = ["research_log.jsonl"];
 
 async function discoverLogs(): Promise<string[]> {
-  // Probe well-known names. The dev server returns 404 if a file
-  // doesn't exist; we collect the ones that do.
+  // Try Vite's filesystem listing first - it returns a directory index
+  // when allowed. Falls through to a probe list if that doesn't work.
+  try {
+    const r = await fetch("/?_=" + Date.now());
+    if (r.ok) {
+      const text = await r.text();
+      const matches = [
+        ...new Set(text.match(/research_log[A-Za-z0-9._-]*\.jsonl/g) ?? []),
+      ];
+      if (matches.length > 0) return matches;
+    }
+  } catch {
+    // ignore, fall through
+  }
   const candidates = [
     "research_log.jsonl",
     "research_validation_log.jsonl",
     "research_log_watertankrun.jsonl",
+    "research_log_watertankrun_5min.jsonl",
     "research_log_singlemap.jsonl",
   ];
   const found: string[] = [];

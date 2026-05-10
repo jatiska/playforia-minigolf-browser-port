@@ -44,10 +44,24 @@ function getLogParam(): string | null {
 }
 
 async function discoverLogs(): Promise<string[]> {
+  // Try directory listing first.
+  try {
+    const r = await fetch("/?_=" + Date.now());
+    if (r.ok) {
+      const text = await r.text();
+      const matches = [
+        ...new Set(text.match(/research_log[A-Za-z0-9._-]*\.jsonl/g) ?? []),
+      ];
+      if (matches.length > 0) return matches;
+    }
+  } catch {
+    // ignore
+  }
   const candidates = [
     "research_log.jsonl",
     "research_validation_log.jsonl",
     "research_log_watertankrun.jsonl",
+    "research_log_watertankrun_5min.jsonl",
     "research_log_singlemap.jsonl",
   ];
   const found: string[] = [];
@@ -55,10 +69,6 @@ async function discoverLogs(): Promise<string[]> {
     try {
       const r = await fetch("/" + c, { method: "HEAD" });
       if (r.ok) {
-        // HEAD returning ok doesn't guarantee body — for JSONL we want
-        // non-empty content. Vite dev server returns 200 with empty
-        // body for missing files in some configs; double-check by
-        // fetching size.
         const lenHdr = r.headers.get("content-length");
         if (lenHdr === null || Number(lenHdr) > 0) found.push(c);
       }

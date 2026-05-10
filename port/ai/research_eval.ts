@@ -91,6 +91,13 @@ interface CliArgs {
    *  side-by-side - each one gets its own log so the loop runner's
    *  prior_best computation isn't confused by other runs' scores. */
   logPath: string | null;
+  /** Override training seconds per (map, seed) trial. When null, the
+   *  budget preset (short/default/long) determines this. */
+  trainSecs: number | null;
+  /** Override number of eval episodes per (map, seed) trial. */
+  evalEps: number | null;
+  /** Override seeds. Default is 3 seeds for noise control. */
+  seedsOverride: number[] | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -100,6 +107,9 @@ function parseArgs(argv: string[]): CliArgs {
     tag: null,
     mapsOverride: null,
     logPath: null,
+    trainSecs: null,
+    evalEps: null,
+    seedsOverride: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -109,6 +119,10 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--maps")
       args.mapsOverride = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
     else if (a === "--log-path") args.logPath = argv[++i];
+    else if (a === "--train-secs") args.trainSecs = Number(argv[++i]);
+    else if (a === "--eval-eps") args.evalEps = Number(argv[++i]);
+    else if (a === "--seeds")
+      args.seedsOverride = argv[++i].split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
   }
   return args;
 }
@@ -196,7 +210,12 @@ async function main() {
     ? args.mapsOverride
     : args.mode === "smoke" ? ["CurveI.track"] : mapList.map((m) => m.file);
 
-  const budget = budgetFor(args.mode, args.budget);
+  const presetBudget = budgetFor(args.mode, args.budget);
+  const budget = {
+    trainSecsPerMap: args.trainSecs ?? presetBudget.trainSecsPerMap,
+    evalEpisodesPerMap: args.evalEps ?? presetBudget.evalEpisodesPerMap,
+    seeds: args.seedsOverride ?? presetBudget.seeds,
+  };
 
   process.stderr.write(
     `[research_eval] mode=${args.mode} budget=${args.budget} ` +

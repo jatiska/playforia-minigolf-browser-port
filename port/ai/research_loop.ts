@@ -91,6 +91,12 @@ interface CliArgs {
    *  (e.g., per-map loop on Watertankrun) without polluting the main
    *  research_log.jsonl. */
   logPath: string | null;
+  /** Optional: override training seconds per (map, seed). */
+  trainSecs: number | null;
+  /** Optional: override eval episodes per (map, seed). */
+  evalEps: number | null;
+  /** Optional: comma-separated seeds list. */
+  seedsCsv: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -106,6 +112,9 @@ function parseArgs(argv: string[]): CliArgs {
     dryRun: false,
     mapsCsv: null,
     logPath: null,
+    trainSecs: null,
+    evalEps: null,
+    seedsCsv: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -120,6 +129,9 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--dry-run") out.dryRun = true;
     else if (a === "--maps") out.mapsCsv = argv[++i];
     else if (a === "--log-path") out.logPath = argv[++i];
+    else if (a === "--train-secs") out.trainSecs = Number(argv[++i]);
+    else if (a === "--eval-eps") out.evalEps = Number(argv[++i]);
+    else if (a === "--seeds") out.seedsCsv = argv[++i];
   }
   return out;
 }
@@ -276,6 +288,9 @@ function runEval(
   mode: "eval" | "validate" | "smoke" = "eval",
   mapsCsv: string | null = null,
   logPath: string | null = null,
+  trainSecs: number | null = null,
+  evalEps: number | null = null,
+  seedsCsv: string | null = null,
 ): { score: number; ok: boolean; stderr: string } {
   const evalArgs = [
     "--experimental-strip-types",
@@ -287,6 +302,9 @@ function runEval(
   ];
   if (mapsCsv) evalArgs.push("--maps", mapsCsv);
   if (logPath) evalArgs.push("--log-path", logPath);
+  if (trainSecs != null) evalArgs.push("--train-secs", String(trainSecs));
+  if (evalEps != null) evalArgs.push("--eval-eps", String(evalEps));
+  if (seedsCsv) evalArgs.push("--seeds", seedsCsv);
   const result = spawnSync(process.execPath, evalArgs, {
     encoding: "utf8",
     maxBuffer: 100 * 1024 * 1024,
@@ -418,6 +436,9 @@ async function main() {
       args.evalMode,
       args.mapsCsv,
       args.logPath,
+      args.trainSecs,
+      args.evalEps,
+      args.seedsCsv,
     );
     const evalSecs = (Date.now() - evalStart) / 1000;
 
