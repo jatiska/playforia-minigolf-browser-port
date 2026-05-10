@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import path from "node:path";
+import { autoresearchPlugin } from "./vite-plugin-autoresearch.ts";
 
 // Reuse the web client's already-prepared atlas/sprite assets so we don't
 // double-store them. Run `npm run assets` from port/ once; both apps then
@@ -9,6 +10,7 @@ const PUBLIC_DIR = path.resolve(__dirname, "../web/public");
 export default defineConfig({
   root: ".",
   publicDir: PUBLIC_DIR,
+  plugins: [autoresearchPlugin()],
   resolve: {
     alias: {
       "@minigolf/shared": path.resolve(__dirname, "../shared/src/index.ts"),

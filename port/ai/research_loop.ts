@@ -53,12 +53,50 @@ const LOG_PATH = resolve(here, "research_log.jsonl");
 const PROGRAM_MD_PATH = resolve(here, "program.md");
 const RUNNER_LOG_PATH = resolve(here, "research_runner_log.jsonl");
 const LOOP_STATUS_PATH = resolve(here, ".loop_status.json");
+const PID_PATH = resolve(here, ".loop_pid.json");
+const EVENTS_PATH = resolve(here, "research_loop_events.jsonl");
+const STOP_FLAG_PATH = resolve(here, ".loop_stop");
 
 function writeLoopStatus(extra: Record<string, unknown>): void {
   try {
     writeFileSync(
       LOOP_STATUS_PATH,
       JSON.stringify({ updated_at: new Date().toISOString(), ...extra }),
+    );
+  } catch {
+    // best effort
+  }
+}
+
+function writePid(): void {
+  try {
+    writeFileSync(
+      PID_PATH,
+      JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }),
+    );
+  } catch {
+    // best effort
+  }
+}
+
+function clearPid(): void {
+  try {
+    if (existsSync(PID_PATH)) {
+      const fs = require("node:fs") as typeof import("node:fs");
+      fs.unlinkSync(PID_PATH);
+    }
+  } catch {
+    // best effort
+  }
+}
+
+/** Append a single event line to research_loop_events.jsonl. The dashboard
+ *  tails this for the "what is happening right now" narrative. */
+function logEvent(event: string, extra: Record<string, unknown> = {}): void {
+  try {
+    appendFileSync(
+      EVENTS_PATH,
+      JSON.stringify({ ts: new Date().toISOString(), event, ...extra }) + "\n",
     );
   } catch {
     // best effort
@@ -357,20 +395,61 @@ function logRunner(event: object): void {
 }
 
 let interrupted = false;
-process.on("SIGINT", () => {
-  process.stderr.write("\n[loop] SIGINT received - finishing current iteration\n");
+function onShutdownSignal(sig: string) {
+  process.stderr.write(`\n[loop] ${sig} received - finishing current iteration\n`);
   interrupted = true;
+  logEvent("shutdown_signal", { signal: sig });
+}
+process.on("SIGINT", () => onShutdownSignal("SIGINT"));
+process.on("SIGTERM", () => onShutdownSignal("SIGTERM"));
+process.on("exit", () => {
+  clearPid();
 });
+
+/** Cross-platform graceful stop. Windows ignores SIGINT (Node's
+ *  process.kill on win32 actually calls TerminateProcess), so we also
+ *  poll a stop-flag file the Vite plugin can create. The flag is
+ *  removed on loop start. */
+function checkStopFlag(): boolean {
+  if (existsSync(STOP_FLAG_PATH)) {
+    interrupted = true;
+    logEvent("stop_flag_seen");
+    return true;
+  }
+  return false;
+}
+
+function clearStopFlag(): void {
+  try {
+    if (existsSync(STOP_FLAG_PATH)) {
+      const fs = require("node:fs") as typeof import("node:fs");
+      fs.unlinkSync(STOP_FLAG_PATH);
+    }
+  } catch {
+    // ignore
+  }
+}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  clearStopFlag(); // Drop any stale stop flag from a prior run.
+  writePid();
+  logEvent("loop_start", {
+    max_iterations: args.maxIterations,
+    budget: args.budget,
+    train_secs: args.trainSecs,
+    eval_eps: args.evalEps,
+    maps: args.mapsCsv,
+    log_path: args.logPath,
+    dry_run: args.dryRun,
+  });
   process.stderr.write(
     `[loop] starting: max=${args.maxIterations} budget=${args.budget} dry-run=${args.dryRun}\n`,
   );
 
   const effectiveLogPath = args.logPath ?? LOG_PATH;
   for (let iter = 1; iter <= args.maxIterations; iter++) {
-    if (interrupted) break;
+    if (checkStopFlag() || interrupted) break;
 
     const rows = readLog(effectiveLogPath);
     const stop = shouldStop(rows, args);
@@ -394,29 +473,43 @@ async function main() {
       phase: args.dryRun ? "dry_run" : "calling_agent",
       log_path: args.logPath ?? null,
     });
+    logEvent("iteration_start", {
+      iteration: iter,
+      max_iterations: args.maxIterations,
+      prior_best: priorBest === -Infinity ? null : priorBest,
+    });
 
     // 2-4. Get a new program (unless dry-run).
     if (!args.dryRun) {
       const prompt = buildAgentPrompt(rows, args);
       let proposed: string;
+      logEvent("agent_call_start", { iteration: iter, prompt_chars: prompt.length });
+      const agentStart = Date.now();
       try {
         const raw = callAgent(prompt, args.agentCmd);
         proposed = stripCodeFence(raw);
       } catch (e: any) {
         process.stderr.write(`[loop] agent call failed: ${e?.message}\n`);
         logRunner({ iteration: iter, event: "agent_error", error: String(e) });
+        logEvent("agent_call_failed", { iteration: iter, error: String(e) });
         break;
       }
       const validation = await validateProgram(proposed);
       if (!validation.ok) {
         process.stderr.write(`[loop] proposed program invalid: ${validation.reason}\n`);
         logRunner({ iteration: iter, event: "invalid_proposal", reason: validation.reason });
+        logEvent("invalid_proposal", { iteration: iter, reason: validation.reason });
         // Restore backup, skip this iteration.
         copyFileSync(PROGRAM_BACKUP_PATH, PROGRAM_PATH);
         continue;
       }
       writeFileSync(PROGRAM_PATH, proposed);
       process.stderr.write(`[loop] proposal applied (${proposed.length} chars)\n`);
+      logEvent("agent_call_done", {
+        iteration: iter,
+        proposed_chars: proposed.length,
+        secs: (Date.now() - agentStart) / 1000,
+      });
     } else {
       process.stderr.write(`[loop] dry-run: skipping agent, using current program\n`);
     }
@@ -430,6 +523,7 @@ async function main() {
       phase: "running_eval",
       log_path: args.logPath ?? null,
     });
+    logEvent("eval_start", { iteration: iter });
     const evalStart = Date.now();
     const { score, ok, stderr } = runEval(
       args.budget,
@@ -445,6 +539,7 @@ async function main() {
     if (!ok) {
       process.stderr.write(`[loop] eval crashed:\n${stderr}\n`);
       logRunner({ iteration: iter, event: "eval_error", stderr: stderr.slice(0, 1000) });
+      logEvent("eval_error", { iteration: iter, stderr: stderr.slice(0, 500) });
       copyFileSync(PROGRAM_BACKUP_PATH, PROGRAM_PATH);
       continue;
     }
@@ -462,6 +557,13 @@ async function main() {
     logRunner({
       iteration: iter,
       event: "iteration_done",
+      score,
+      prior_best: priorBest === -Infinity ? null : priorBest,
+      kept,
+      eval_secs: evalSecs,
+    });
+    logEvent("iteration_done", {
+      iteration: iter,
       score,
       prior_best: priorBest === -Infinity ? null : priorBest,
       kept,
@@ -488,6 +590,8 @@ async function main() {
   }
 
   writeLoopStatus({ running: false, phase: "finished", log_path: args.logPath ?? null });
+  logEvent("loop_finished", { interrupted });
+  clearPid();
   process.stderr.write(`\n[loop] finished\n`);
 }
 

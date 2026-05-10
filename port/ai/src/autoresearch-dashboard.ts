@@ -52,6 +52,29 @@ interface LoopStatus {
   updated_at?: string;
 }
 
+interface ApiStatus {
+  running: boolean;
+  pid: number | null;
+  started_at: string | null;
+  loop_status: LoopStatus | null;
+}
+
+interface LoopEvent {
+  ts: string;
+  event: string;
+  iteration?: number;
+  max_iterations?: number;
+  prior_best?: number | null;
+  score?: number;
+  kept?: boolean;
+  eval_secs?: number;
+  proposed_chars?: number;
+  secs?: number;
+  signal?: string;
+  reason?: string;
+  interrupted?: boolean;
+}
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T | null;
 
@@ -129,6 +152,54 @@ async function fetchLoopStatus(): Promise<LoopStatus | null> {
     return (await r.json()) as LoopStatus;
   } catch {
     return null;
+  }
+}
+
+async function fetchApiStatus(): Promise<ApiStatus | null> {
+  try {
+    const r = await fetch("/api/loop/status");
+    if (!r.ok) return null;
+    return (await r.json()) as ApiStatus;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchEvents(): Promise<LoopEvent[]> {
+  try {
+    const r = await fetch("/api/loop/events?max=200");
+    if (!r.ok) return [];
+    const body = (await r.json()) as { events: LoopEvent[] };
+    return body.events ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function postStartLoop(body: {
+  trainSecs?: number;
+  mapsCsv?: string;
+  logPath?: string;
+  maxIterations?: number;
+}): Promise<{ ok: boolean; error?: string; pid?: number }> {
+  try {
+    const r = await fetch("/api/loop/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+async function postStopLoop(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const r = await fetch("/api/loop/stop", { method: "POST" });
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
   }
 }
 
@@ -369,6 +440,109 @@ function setLive(connected: boolean): void {
   el.classList.toggle("on", connected);
 }
 
+function renderControls(api: ApiStatus | null): void {
+  const pill = $("loop-state-pill")!;
+  const text = $("loop-state-text")!;
+  const btnStart = $<HTMLButtonElement>("btn-start")!;
+  const btnStop = $<HTMLButtonElement>("btn-stop")!;
+  const running = !!api?.running;
+  pill.classList.remove("running", "stopped", "starting");
+  if (running) {
+    pill.classList.add("running");
+    pill.textContent = "running";
+    const ls = api?.loop_status;
+    if (ls && ls.iteration && ls.max_iterations) {
+      text.textContent = `iteration ${ls.iteration}/${ls.max_iterations} — ${ls.phase ?? "?"}`;
+    } else {
+      text.textContent = `pid ${api?.pid ?? "?"}`;
+    }
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+  } else {
+    pill.classList.add("stopped");
+    pill.textContent = "stopped";
+    text.textContent = "no loop running";
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+  }
+}
+
+function renderProgressBar(eval_: LiveStatus | null, loop: LoopStatus | null): void {
+  const row = $("progress-row")!;
+  const fill = $("progress-fill")!;
+  const txt = $("progress-text")!;
+  const lbl = $("progress-label")!;
+  if (!loop || !loop.running || !eval_ || eval_.phase === "done") {
+    row.style.display = "none";
+    return;
+  }
+  row.style.display = "";
+  if (eval_.phase === "train" && eval_.current_map) {
+    const pct = Math.max(0, Math.min(1, eval_.pct ?? 0));
+    fill.style.width = `${(pct * 100).toFixed(1)}%`;
+    txt.textContent = `${(pct * 100).toFixed(0)}%`;
+    lbl.textContent = `iter ${loop.iteration} · training ${eval_.current_map} seed=${eval_.current_seed}`;
+  } else if (eval_.phase === "eval") {
+    fill.style.width = "100%";
+    txt.textContent = "eval";
+    lbl.textContent = `iter ${loop.iteration} · evaluating`;
+  } else {
+    fill.style.width = "0%";
+    txt.textContent = eval_.phase ?? "...";
+    lbl.textContent = `iter ${loop.iteration} · ${loop.phase}`;
+  }
+}
+
+function fmtEventTs(iso: string): string {
+  return iso.slice(11, 19); // HH:MM:SS
+}
+
+function renderEventLine(e: LoopEvent): string {
+  const ts = `<span class="ts">${fmtEventTs(e.ts)}</span>`;
+  const ev = `<span class="ev">${e.event}</span>`;
+  let body = "";
+  let extraCls = "";
+  switch (e.event) {
+    case "loop_start":
+      body = `started`;
+      break;
+    case "iteration_start":
+      body = `iter ${e.iteration}/${e.max_iterations} — prior best ${e.prior_best?.toFixed(4) ?? "(none)"}`;
+      break;
+    case "agent_call_start":
+      body = `iter ${e.iteration} — calling agent`;
+      break;
+    case "agent_call_done":
+      body = `iter ${e.iteration} — agent returned (${e.proposed_chars} chars, ${e.secs?.toFixed(1)}s)`;
+      break;
+    case "eval_start":
+      body = `iter ${e.iteration} — eval starting`;
+      break;
+    case "iteration_done":
+      body = `iter ${e.iteration} — score ${e.score?.toFixed(4)} ${e.kept ? "✓ KEPT" : "✕ REVERTED"} (eval ${e.eval_secs?.toFixed(0)}s)`;
+      if (!e.kept) extraCls = "reverted";
+      break;
+    case "shutdown_signal":
+      body = `${e.signal} received — finishing current iteration`;
+      break;
+    case "loop_finished":
+      body = `loop finished${e.interrupted ? " (interrupted)" : ""}`;
+      break;
+    case "agent_call_failed":
+      body = `agent call failed`;
+      break;
+    case "invalid_proposal":
+      body = `invalid proposal: ${e.reason ?? "?"}`;
+      break;
+    case "eval_error":
+      body = `eval error`;
+      break;
+    default:
+      body = "";
+  }
+  return `<div class="event-line ${e.event} ${extraCls}">${ts}${ev}${body}</div>`;
+}
+
 async function refresh() {
   // Re-discover logs every refresh cycle so a new log file (e.g. one
   // the user created mid-session by running a single-map loop) shows
@@ -385,17 +559,95 @@ async function refresh() {
   const rows = await fetchLog(path);
   const status = await fetchStatus();
   const loopStatus = await fetchLoopStatus();
+  const apiStatus = await fetchApiStatus();
+  const events = await fetchEvents();
 
   setLive(true);
   $("chart")!.innerHTML = renderChart(rows);
   $("stats")!.innerHTML = renderStats(rows);
   $("iter-list")!.innerHTML = renderIterList(rows);
   $("per-map")!.innerHTML = renderPerMap(rows);
-  $("live-status")!.innerHTML = renderLiveStatus(status, loopStatus);
+  renderControls(apiStatus);
+  renderProgressBar(status, loopStatus);
+  // Render events feed (dedupe by ts+event so re-fetches don't flicker).
+  const eventsEl = $("events")!;
+  const wasAtBottom = eventsEl.scrollHeight - eventsEl.scrollTop - eventsEl.clientHeight < 30;
+  eventsEl.innerHTML = events.length > 0
+    ? events.map(renderEventLine).join("")
+    : `<div class="event-line" style="color:var(--muted-2)">no events yet — start a loop to populate</div>`;
+  if (wasAtBottom) eventsEl.scrollTop = eventsEl.scrollHeight;
+
   $("last-refresh")!.textContent = new Date().toLocaleTimeString();
   // Keep the report link pointing at the currently-selected log.
   const reportLink = $<HTMLAnchorElement>("report-link");
   if (reportLink) reportLink.href = `/autoresearch-report.html?log=${encodeURIComponent(path)}`;
+}
+
+function logPathFromMaps(mapsCsv: string): string {
+  // e.g. "Watertankrun.track" -> "research_log_watertankrun.jsonl"
+  if (!mapsCsv.trim()) return "research_log.jsonl";
+  const slug = mapsCsv
+    .split(",")[0]
+    .replace(/\.track$/i, "")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .toLowerCase();
+  return `research_log_${slug}.jsonl`;
+}
+
+function bindControlHandlers() {
+  const btnStart = $<HTMLButtonElement>("btn-start");
+  const btnStop = $<HTMLButtonElement>("btn-stop");
+  const cfgTrainSecs = $<HTMLInputElement>("cfg-train-secs");
+  const cfgMaps = $<HTMLInputElement>("cfg-maps");
+  const cfgLogPath = $<HTMLInputElement>("cfg-log-path");
+  const cfgMaxIters = $<HTMLInputElement>("cfg-max-iters");
+
+  // Auto-derive log path from maps when log path is blank.
+  if (cfgMaps && cfgLogPath) {
+    cfgMaps.addEventListener("input", () => {
+      if (!cfgLogPath.value) {
+        cfgLogPath.placeholder = logPathFromMaps(cfgMaps.value);
+      }
+    });
+  }
+
+  btnStart?.addEventListener("click", async () => {
+    btnStart.disabled = true;
+    const trainSecs = Number(cfgTrainSecs?.value) || 300;
+    const mapsCsv = cfgMaps?.value.trim() || undefined;
+    const logPath = cfgLogPath?.value.trim() || (mapsCsv ? logPathFromMaps(mapsCsv) : undefined);
+    const maxIterations = Number(cfgMaxIters?.value) || 1000;
+    const result = await postStartLoop({ trainSecs, mapsCsv, logPath, maxIterations });
+    if (!result.ok) {
+      alert("Start failed: " + (result.error ?? "unknown"));
+      btnStart.disabled = false;
+    } else {
+      // Switch the log dropdown to whatever the loop is writing to.
+      if (logPath) {
+        const select = $<HTMLSelectElement>("log-select");
+        if (select) {
+          // Add to options if not present.
+          if (!Array.from(select.options).some((o) => o.value === logPath)) {
+            const opt = document.createElement("option");
+            opt.value = logPath;
+            opt.textContent = logPath;
+            select.appendChild(opt);
+          }
+          select.value = logPath;
+        }
+      }
+      refresh();
+    }
+  });
+
+  btnStop?.addEventListener("click", async () => {
+    btnStop.disabled = true;
+    const result = await postStopLoop();
+    if (!result.ok) {
+      alert("Stop failed: " + (result.error ?? "unknown"));
+    }
+    refresh();
+  });
 }
 
 async function init() {
@@ -405,6 +657,7 @@ async function init() {
     select.innerHTML = knownLogs.map((l) => `<option value="${l}">${l}</option>`).join("");
     select.addEventListener("change", refresh);
   }
+  bindControlHandlers();
   refresh();
   setInterval(refresh, 2000);
 }
