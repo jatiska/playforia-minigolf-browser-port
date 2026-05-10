@@ -42,6 +42,16 @@ interface LiveStatus {
   final_score?: number;
 }
 
+interface LoopStatus {
+  running?: boolean;
+  iteration?: number;
+  max_iterations?: number;
+  prior_best?: number | null;
+  phase?: "calling_agent" | "running_eval" | "dry_run" | "finished";
+  log_path?: string | null;
+  updated_at?: string;
+}
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T | null;
 
@@ -94,6 +104,16 @@ async function fetchStatus(): Promise<LiveStatus | null> {
     const r = await fetch("/.eval_status.json?_=" + Date.now());
     if (!r.ok) return null;
     return (await r.json()) as LiveStatus;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLoopStatus(): Promise<LoopStatus | null> {
+  try {
+    const r = await fetch("/.loop_status.json?_=" + Date.now());
+    if (!r.ok) return null;
+    return (await r.json()) as LoopStatus;
   } catch {
     return null;
   }
@@ -301,22 +321,32 @@ function renderPerMap(rows: LogRow[]): string {
   return html;
 }
 
-function renderLiveStatus(status: LiveStatus | null): string {
-  if (!status) return "no eval running";
-  if (status.phase === "done") {
-    const startedAt = status.started_at ? new Date(status.started_at).toLocaleTimeString() : "?";
-    return `done @ ${startedAt}, final score = ${status.final_score?.toFixed(4) ?? "—"}`;
-  }
+function renderLiveStatus(eval_: LiveStatus | null, loop: LoopStatus | null): string {
   const lines: string[] = [];
-  lines.push(`<span class="log-line ${status.phase ?? ""}">phase=${status.phase ?? "?"}</span>`);
-  if (status.mode) lines.push(`mode=${status.mode}  budget=${status.budget ?? "?"}`);
-  if (typeof status.maps === "number") lines.push(`maps=${status.maps}  seeds=${(status.seeds ?? []).join(",")}`);
-  if (status.current_map) {
-    const pct = status.pct != null ? ` ${(status.pct * 100).toFixed(0)}%` : "";
-    lines.push(`current: ${status.current_map} seed=${status.current_seed}${pct}`);
+  if (loop && loop.running) {
+    lines.push(
+      `<span class="log-line ${loop.phase ?? ""}">loop: iteration ${loop.iteration}/${loop.max_iterations} — ${loop.phase}</span>`,
+    );
+    if (loop.prior_best != null) lines.push(`prior best: ${loop.prior_best.toFixed(4)}`);
+  } else if (loop && loop.phase === "finished") {
+    lines.push(`<span class="log-line done">loop: finished</span>`);
   }
-  if (status.tag) lines.push(`tag=${status.tag}`);
-  return lines.join("\n");
+  if (eval_) {
+    if (eval_.phase === "done") {
+      const startedAt = eval_.started_at ? new Date(eval_.started_at).toLocaleTimeString() : "?";
+      lines.push(`<span class="log-line done">eval: done @ ${startedAt}, final = ${eval_.final_score?.toFixed(4) ?? "—"}</span>`);
+    } else {
+      lines.push(`<span class="log-line ${eval_.phase ?? ""}">eval: phase=${eval_.phase ?? "?"}</span>`);
+      if (eval_.mode) lines.push(`mode=${eval_.mode}  budget=${eval_.budget ?? "?"}`);
+      if (typeof eval_.maps === "number") lines.push(`maps=${eval_.maps}  seeds=${(eval_.seeds ?? []).join(",")}`);
+      if (eval_.current_map) {
+        const pct = eval_.pct != null ? ` ${(eval_.pct * 100).toFixed(0)}%` : "";
+        lines.push(`current: ${eval_.current_map} seed=${eval_.current_seed}${pct}`);
+      }
+      if (eval_.tag) lines.push(`tag=${eval_.tag}`);
+    }
+  }
+  return lines.length === 0 ? "no eval running" : lines.join("\n");
 }
 
 function setLive(connected: boolean): void {
@@ -341,13 +371,14 @@ async function refresh() {
   const path = select?.value ?? "research_log.jsonl";
   const rows = await fetchLog(path);
   const status = await fetchStatus();
+  const loopStatus = await fetchLoopStatus();
 
   setLive(true);
   $("chart")!.innerHTML = renderChart(rows);
   $("stats")!.innerHTML = renderStats(rows);
   $("iter-list")!.innerHTML = renderIterList(rows);
   $("per-map")!.innerHTML = renderPerMap(rows);
-  $("live-status")!.innerHTML = renderLiveStatus(status);
+  $("live-status")!.innerHTML = renderLiveStatus(status, loopStatus);
   $("last-refresh")!.textContent = new Date().toLocaleTimeString();
 }
 

@@ -52,6 +52,18 @@ const PROGRAM_BACKUP_PATH = resolve(here, ".research_program.ts.backup");
 const LOG_PATH = resolve(here, "research_log.jsonl");
 const PROGRAM_MD_PATH = resolve(here, "program.md");
 const RUNNER_LOG_PATH = resolve(here, "research_runner_log.jsonl");
+const LOOP_STATUS_PATH = resolve(here, ".loop_status.json");
+
+function writeLoopStatus(extra: Record<string, unknown>): void {
+  try {
+    writeFileSync(
+      LOOP_STATUS_PATH,
+      JSON.stringify({ updated_at: new Date().toISOString(), ...extra }),
+    );
+  } catch {
+    // best effort
+  }
+}
 
 interface CliArgs {
   maxIterations: number;
@@ -146,7 +158,7 @@ function priorBestScore(rows: LogRow[]): number {
  *    program.md + log tail + current research_program.ts.
  *  No prescribed step-by-step. The agent's job is to look at all three
  *  and emit a NEW research_program.ts. */
-function buildAgentPrompt(rows: LogRow[]): string {
+function buildAgentPrompt(rows: LogRow[], args: CliArgs): string {
   const programMd = readFileSync(PROGRAM_MD_PATH, "utf8");
   const currentProgram = readFileSync(PROGRAM_PATH, "utf8");
   const lastN = rows.slice(-30);
@@ -163,8 +175,22 @@ function buildAgentPrompt(rows: LogRow[]): string {
     )
     .join("\n");
 
+  // Tell the agent what the eval is actually scoring against. Without
+  // this, single-map runs see "score = 0.0" and reason about the
+  // multi-map 16-map baseline (since program.md is written for that),
+  // which produces correct intuition but mis-calibrated targets.
+  const scopeNote = args.mapsCsv
+    ? `**Scope:** this loop is running on the custom map subset \`${args.mapsCsv}\`.\n` +
+      `Score is success-rate averaged across these maps × 3 seeds. The 16-map\n` +
+      `baseline of 0.125 in program.md does not apply to this run; use the\n` +
+      `JSONL log's prior iterations on the same scope as your reference.`
+    : `**Scope:** this loop is running on the full 16-map eval set defined in\n` +
+      `headless/maps.ts, score = mean success-rate × 3 seeds.`;
+
   return [
     "# autoresearch loop iteration",
+    "",
+    scopeNote,
     "",
     "## program.md (the steering wheel)",
     programMd,
@@ -342,10 +368,18 @@ async function main() {
     copyFileSync(PROGRAM_PATH, PROGRAM_BACKUP_PATH);
     const priorBest = priorBestScore(rows);
     process.stderr.write(`[loop] prior best score: ${priorBest === -Infinity ? "none" : priorBest.toFixed(4)}\n`);
+    writeLoopStatus({
+      running: true,
+      iteration: iter,
+      max_iterations: args.maxIterations,
+      prior_best: priorBest === -Infinity ? null : priorBest,
+      phase: args.dryRun ? "dry_run" : "calling_agent",
+      log_path: args.logPath ?? null,
+    });
 
     // 2-4. Get a new program (unless dry-run).
     if (!args.dryRun) {
-      const prompt = buildAgentPrompt(rows);
+      const prompt = buildAgentPrompt(rows, args);
       let proposed: string;
       try {
         const raw = callAgent(prompt, args.agentCmd);
@@ -370,6 +404,14 @@ async function main() {
     }
 
     // 5-6. Run eval, get score.
+    writeLoopStatus({
+      running: true,
+      iteration: iter,
+      max_iterations: args.maxIterations,
+      prior_best: priorBest === -Infinity ? null : priorBest,
+      phase: "running_eval",
+      log_path: args.logPath ?? null,
+    });
     const evalStart = Date.now();
     const { score, ok, stderr } = runEval(
       args.budget,
@@ -424,6 +466,7 @@ async function main() {
     }
   }
 
+  writeLoopStatus({ running: false, phase: "finished", log_path: args.logPath ?? null });
   process.stderr.write(`\n[loop] finished\n`);
 }
 
