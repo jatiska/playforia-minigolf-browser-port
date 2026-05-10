@@ -13,6 +13,10 @@ interface ScanRow {
   secs: number;
   timed_out?: boolean;
   error?: string;
+  /** Best stroke count any human has logged for this track. From the
+   *  .track I-line. -1 means no human record exists. */
+  bestPar?: number;
+  bestPlayer?: string | null;
 }
 
 interface ScanFile {
@@ -23,6 +27,9 @@ interface ScanFile {
   err_count?: number;
   timeout_count?: number;
   budget_secs?: number;
+  workers?: number;
+  angle_step?: number;
+  power_step?: number;
   elapsed_secs: number;
   tracks: ScanRow[];
 }
@@ -92,11 +99,22 @@ function renderStats(scan: ScanFile): void {
   const timeouts = scan.timeout_count ?? 0;
   const nonHio = completed - hio - errors - timeouts;
   const budget = scan.budget_secs ?? 0;
+  // Count "unknown HIO" - HIO-able by physics but no human ever
+  // recorded a 1-stroke completion. This is the candidate list of
+  // unknown shortcuts.
+  const unknownHio = scan.tracks.filter(
+    (r) => r.hio && (r.bestPar ?? -1) > 1,
+  ).length;
   el.innerHTML = `
     <div class="stat"><div class="val">${total}</div><div class="lbl">total tracks</div><div class="sub">in port/server/tracks</div></div>
     <div class="stat"><div class="val">${hio}</div><div class="lbl">HIO-able</div><div class="sub">${((hio / Math.max(1, completed)) * 100).toFixed(0)}% of scanned</div></div>
+    <div class="stat" style="border-color:#d29922;">
+      <div class="val" style="color:#d29922">${unknownHio}</div>
+      <div class="lbl">unknown HIO</div>
+      <div class="sub">HIO-able but bestPar &gt; 1</div>
+    </div>
     <div class="stat"><div class="val">${nonHio}</div><div class="lbl">grid exhausted</div><div class="sub">no HIO at this resolution</div></div>
-    <div class="stat"><div class="val">${timeouts}</div><div class="lbl">timed out</div><div class="sub">budget ${budget}s exhausted</div></div>
+    <div class="stat"><div class="val">${timeouts}</div><div class="lbl">timed out</div><div class="sub">${budget > 0 ? `budget ${budget}s` : "n/a"}</div></div>
     <div class="stat"><div class="val">${errors}</div><div class="lbl">errors</div></div>
     <div class="stat"><div class="val">${(scan.elapsed_secs / 60).toFixed(1)}m</div><div class="lbl">scan wall</div><div class="sub">${(scan.elapsed_secs / Math.max(1, completed) * 1000).toFixed(0)}ms / track avg</div></div>
   `;
@@ -116,10 +134,21 @@ function rowHtml(r: ScanRow): string {
   const tries = r.candidatesTried != null ? r.candidatesTried.toLocaleString() : "—";
   const secs = r.secs.toFixed(2);
   const link = `/index.html?map=${encodeURIComponent(r.file)}`;
+  const bp = r.bestPar ?? -1;
+  // "Unknown HIO": physics says HIO-able, but no human has logged 1.
+  // Highlight the bestPar cell so it stands out.
+  const unknownHio = r.hio && bp > 1;
+  const bestParCell =
+    bp <= 0
+      ? `<span style="color:var(--muted-2)">no record</span>`
+      : unknownHio
+        ? `<span style="color:#d29922;font-weight:600;" title="HIO-able by physics but humans never got 1!">${bp}${r.bestPlayer ? ` (${escapeHtml(r.bestPlayer)})` : ""}</span>`
+        : `${bp}${r.bestPlayer ? ` <span style="color:var(--muted-2)">(${escapeHtml(r.bestPlayer)})</span>` : ""}`;
   return `<tr>
     <td>${escapeHtml(r.name)}</td>
     <td><a class="file-link" href="${link}">${escapeHtml(r.file)}</a></td>
     <td>${badge}</td>
+    <td>${bestParCell}</td>
     <td style="font-family:ui-monospace,monospace;font-size:12px">${action}</td>
     <td>${tries}</td>
     <td>${secs}</td>
@@ -135,6 +164,8 @@ function applyFilters(): ScanRow[] {
   let rows = cache.tracks.slice();
   // Filter by kind.
   if (kind === "hio") rows = rows.filter((r) => r.hio);
+  else if (kind === "hio-unknown")
+    rows = rows.filter((r) => r.hio && (r.bestPar ?? -1) > 1);
   else if (kind === "non-hio") rows = rows.filter((r) => !r.hio && !r.error);
   else if (kind === "timeout") rows = rows.filter((r) => !!r.timed_out);
   else if (kind === "errors") rows = rows.filter((r) => !!r.error);
