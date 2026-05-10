@@ -13,11 +13,13 @@
 //   - numParallel up to 8 (slider goes to 16). program.md flags this as
 //     "slow and not load-bearing"; we enforce it here.
 //
-//   - searchHIOFirst is allowed (0/1) but the harness records hioWon
-//     per map. The score still counts HIO wins (the policy *did* hole
-//     in 1, even if it was via brute force) - this is intentional. The
-//     hioWon flag exists for the human to spot "every win is HIO" and
-//     decide whether to widen the eval map set.
+//   - searchHIOFirst is locked at 0. The HIO brute-force pre-search
+//     solves nearly every curated eval map in <3 seconds. With HIO=1
+//     enabled, score saturates at 1.0 immediately and the loop's
+//     strict-better-or-revert rule freezes there forever - the policy
+//     never gets to matter. Calibration confirmed this empirically.
+//     The user-facing BOUNDS in src/config.ts still allow 0/1 for
+//     the browser trainer; only autoresearch is locked.
 //
 // The eval harness applies these bounds via `clampToAutoresearchBounds`
 // before training. If the program's exported config sets a knob outside
@@ -88,8 +90,15 @@ export const AUTORESEARCH_BOUNDS: Record<keyof TrainingConfig, Bound> = {
   // destabilisation; the loop CAN turn it on but only as one knob
   // among many.
   learnFromRejectedShots: { min: 0, max: 1 },
-  // searchHIOFirst: 0/1. Allowed; harness records hioWon for the human.
-  searchHIOFirst: { min: 0, max: 1 },
+  // searchHIOFirst: locked at 0 for autoresearch.
+  // The HIO brute-force pre-search solves nearly every curated eval
+  // map in <3 seconds. With HIO=1, score saturates at 1.0 and the
+  // loop's strict-better-or-revert rule means whichever variant got
+  // there first becomes the eternal best - the policy never gets to
+  // matter. Lock structurally rather than rely on program.md prose.
+  // The user-facing BOUNDS in src/config.ts still allow 0/1 - only
+  // autoresearch is locked.
+  searchHIOFirst: { min: 0, max: 0 },
 };
 
 /** Return a copy of `cfg` with every knob clamped into the autoresearch

@@ -85,11 +85,19 @@ export const NOTES = `
 Initial state: production DEFAULTS from src/config.ts as of handoff,
 with searchHIOFirst=0 (HIO off). The HIO brute-force solves nearly
 every map in <3s, which saturates the score and leaves the RL policy
-invisible to the metric. With HIO off, the score reflects what the
-policy actually learns.
+invisible to the metric.
 
-No iterations run yet. The loop's first job is to verify the eval
-metric reacts to known-good changes (per AUTORESEARCH_PLAN.md §10:
-gridSize=5 vs gridSize=11 should differ on hazard maps). After that,
-follow program.md.
+Recorded baseline (--budget short, HIO off): score = 0.125.
+Per-map success: CurveI 100% (mean 7.67 strokes), 1stroke4bounces 100%
+(4 strokes), all other 14 maps 0%. The lowest-hanging fruit is to
+bring even ONE more map (OvalI, Leobas1, Wormhole, etc) to non-zero
+at the same budget. Try progressBonus = 0.002 first - the priors say
+it's the highest-EV starting knob and might give the policy enough
+gradient to make ANY directional progress on maps where it currently
+collapses.
+
+If you can't move score above 0.125 in ~10 iterations, escalate to
+the human via program.md. The most likely next moves are (a) longer
+training budget per map, (b) switching to the composite metric in
+AUTORESEARCH_PLAN.md §3 option 4 to capture stroke efficiency.
 `.trim();

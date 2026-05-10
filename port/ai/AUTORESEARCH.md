@@ -87,13 +87,13 @@ eval), with full per-map breakdown.
 
 Two empirical observations from running the harness:
 
-1. **HIO off in baseline.** The HIO brute-force pre-search
+1. **HIO locked off in autoresearch.** The HIO brute-force pre-search
    (`searchHIOFirst=1`) solves nearly every map in the curated eval set
    in <3s. With HIO on, the score saturates at 1.0 and the RL policy
-   becomes invisible to the metric. The baseline `research_program.ts`
-   sets `searchHIOFirst=0`. The autoresearch loop CAN turn it back on
-   (it's a valid knob) but the resulting score is brute-force quality,
-   not policy quality.
+   becomes invisible to the metric. `headless/autoresearch-bounds.ts`
+   locks `searchHIOFirst: { min: 0, max: 0 }` so the loop cannot turn
+   it on. The user-facing browser trainer (`src/config.ts`) still
+   allows 0/1 unchanged.
 
 2. **Short budget gives no signal on hard maps.** The
    gridSize=5 vs gridSize=11 calibration smoke at 15s × 4 maps × 1 seed
@@ -103,6 +103,29 @@ Two empirical observations from running the harness:
    60s budget shows the same flat-zero behaviour, **switch to the
    composite metric** (option 4 in `AUTORESEARCH_PLAN.md` §3) which
    captures stroke efficiency as well as raw success.
+
+3. **Recorded baseline (HIO off, short budget): score = 0.125.**
+   Full 16-map × 3-seed eval at 15s training/map, with the
+   handoff-default config (gridSize=9, useNavigation=1, all reward
+   shaping at default zero). Per-map breakdown:
+   - **CurveI** (100% holed, mean 7.67 strokes per hole)
+   - **1stroke4bounces** (100% holed, mean 4 strokes)
+   - All other 14 maps: 0% holed.
+
+   The loop's first concrete signal will be "did this variant solve
+   any of OvalI / Leobas1 / Wormhole / etc?" — those are the lowest-
+   hanging fruit (trivially HIO-able with HIO=1; they fail at 15s of
+   pure RL because exploration noise is too uniform to find the hole).
+   Bumping to 60s (`--budget default`) is the recommended first step
+   for the next operator. If 60s also leaves >12 maps at 0%, switch
+   to the composite metric.
+
+4. **Loop machinery verified.** One full `claude --print` iteration
+   takes ~30 seconds (25s agent + 5s smoke eval) when --eval-mode is
+   set to smoke. The runner correctly applies the LLM's proposed
+   edit, validates the format, runs the eval, compares against the
+   prior best, and either keeps or restores from backup. JSONL
+   logging works; analyzer ASCII plots render correctly.
 
 ## How the loop runs
 

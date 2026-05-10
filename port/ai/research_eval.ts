@@ -25,7 +25,7 @@
 // can `cat $(node ... | tail -1)` and parse the score without bespoke
 // machinery. Anything more interesting goes through the JSONL.
 
-import { writeFileSync, appendFileSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -38,6 +38,34 @@ import {
 } from "./headless/autoresearch-bounds.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const TRACKS_DIR = resolve(here, "../server/tracks/tracks");
+
+/**
+ * Verify every map file referenced by EVAL_MAPS + VALIDATION_MAPS
+ * exists on disk. Cheap one-time check at startup so we fail fast
+ * instead of after 12+ minutes of eval when a typo'd validation map
+ * eventually gets loaded.
+ */
+function preflightMaps(): void {
+  const all = [...EVAL_MAPS, ...VALIDATION_MAPS];
+  const missing: string[] = [];
+  for (const m of all) {
+    const path = resolve(TRACKS_DIR, m.file);
+    try {
+      statSync(path);
+    } catch {
+      missing.push(m.file);
+    }
+  }
+  if (missing.length > 0) {
+    process.stderr.write(
+      `[research_eval] PREFLIGHT FAILED: ${missing.length} map files missing:\n` +
+        missing.map((f) => `  - ${f}`).join("\n") +
+        "\n",
+    );
+    process.exit(1);
+  }
+}
 
 const LOG_PATH = resolve(here, "research_log.jsonl");
 const VALIDATION_LOG_PATH = resolve(here, "research_validation_log.jsonl");
@@ -128,6 +156,7 @@ function priorBest(logPath: string): number {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  preflightMaps();
   const startedAt = new Date().toISOString();
   const wallStart = Date.now();
 
