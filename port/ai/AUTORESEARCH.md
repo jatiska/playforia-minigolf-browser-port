@@ -23,6 +23,33 @@ npm run ai:loop:dry     # exercise the loop machinery without an LLM
 npm run ai:loop -- --max-iterations 30 --agent-cmd 'claude --print'
 ```
 
+Single-map experiments (own log, won't pollute the main one):
+
+```bash
+node --experimental-strip-types research_loop.ts \
+  --max-iterations 5 \
+  --maps Watertankrun.track \
+  --log-path research_log_watertankrun.jsonl \
+  --agent-cmd 'claude --print'
+```
+
+## Live dashboard
+
+While the loop or any eval is running, open
+**[/autoresearch.html](http://localhost:5180/autoresearch.html)** in
+the browser. The dashboard polls every 2 s and renders:
+
+- **Score chart**: best-so-far line (green) plus per-iteration dots
+  (filled green = kept, hollow red = reverted).
+- **Live status**: current map / seed / phase / pct, plus loop-level
+  "iteration 3/5, calling_agent | running_eval".
+- **Iteration list**: newest first, with the config diff vs the prior
+  kept iteration, plus the agent's NOTES.
+- **Per-map breakdown**: success rate per map for the latest
+  iteration.
+- **Log dropdown**: switch between the main log, validation log, and
+  any per-experiment `research_log_*.jsonl` (auto-discovered).
+
 ## Files
 
 ```
