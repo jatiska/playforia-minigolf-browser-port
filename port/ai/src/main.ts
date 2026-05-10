@@ -251,8 +251,21 @@ async function main() {
     }
     mapSelect.appendChild(allGroup);
 
-    mapSelect.value = DEFAULT_TRACK_FILE;
+    // Honor ?map=Foo.track in the URL so other pages (e.g. /hio.html)
+    // can deep-link to a specific track. Falls back to DEFAULT_TRACK_FILE
+    // if the param is missing or names a track that isn't in the picker.
+    const urlMap = new URLSearchParams(window.location.search).get("map");
+    const initialMap =
+      urlMap && Array.from(mapSelect.options).some((o) => o.value === urlMap)
+        ? urlMap
+        : DEFAULT_TRACK_FILE;
+    mapSelect.value = initialMap;
     mapSelect.addEventListener("change", () => {
+      // Keep the URL in sync so a refresh / share preserves the
+      // selection.
+      const url = new URL(window.location.href);
+      url.searchParams.set("map", mapSelect.value);
+      history.replaceState(null, "", url.toString());
       void loadMap(mapSelect.value, /*resetAgent=*/ true);
     });
   }
@@ -262,7 +275,9 @@ async function main() {
     chart = new RewardChart(chartCanvas, { windowSize: 25, maxPoints: 500 });
   }
 
-  await loadMap(DEFAULT_TRACK_FILE, /*resetAgent=*/ true);
+  const initialMapFile =
+    new URLSearchParams(window.location.search).get("map") ?? DEFAULT_TRACK_FILE;
+  await loadMap(initialMapFile, /*resetAgent=*/ true);
 
   modeSelect?.addEventListener("change", () => {
     setMode(modeSelect.value as RunMode);

@@ -14,3 +14,6 @@ research_loop_events.jsonl
 # Curation cache (regenerable from scripts/classify-tracks.mjs).
 headless/track-classification.json
 headless/curated-mapsets.json
+
+# HIO scan output (regenerable from scripts/scan-hio.mjs).
+hio-scan.json
