@@ -25,7 +25,13 @@
 // can `cat $(node ... | tail -1)` and parse the score without bespoke
 // machinery. Anything more interesting goes through the JSONL.
 
-import { writeFileSync, appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
+import {
+  writeFileSync,
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -76,15 +82,33 @@ interface CliArgs {
   /** Optional: tag to attach to this row. Useful for experiment tracking
    *  ("baseline", "smoke", "manual-test", etc). */
   tag: string | null;
+  /** CSV override for the map list. When set, the eval runs on these
+   *  filenames instead of EVAL_MAPS / VALIDATION_MAPS. Lets the user
+   *  drive the loop on a single map (or any custom subset) without
+   *  editing maps.ts. */
+  mapsOverride: string[] | null;
+  /** Override the JSONL log path. Useful when running per-map loops
+   *  side-by-side - each one gets its own log so the loop runner's
+   *  prior_best computation isn't confused by other runs' scores. */
+  logPath: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { mode: "eval", budget: "default", tag: null };
+  const args: CliArgs = {
+    mode: "eval",
+    budget: "default",
+    tag: null,
+    mapsOverride: null,
+    logPath: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--mode") args.mode = argv[++i] as CliArgs["mode"];
     else if (a === "--budget") args.budget = argv[++i] as CliArgs["budget"];
     else if (a === "--tag") args.tag = argv[++i];
+    else if (a === "--maps")
+      args.mapsOverride = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
+    else if (a === "--log-path") args.logPath = argv[++i];
   }
   return args;
 }
@@ -156,7 +180,7 @@ function priorBest(logPath: string): number {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  preflightMaps();
+  if (!args.mapsOverride) preflightMaps();
   const startedAt = new Date().toISOString();
   const wallStart = Date.now();
 
@@ -168,8 +192,9 @@ async function main() {
   const wasClamped = JSON.stringify(requestedCfg) !== JSON.stringify(clampedCfg);
 
   const mapList = args.mode === "validate" ? VALIDATION_MAPS : EVAL_MAPS;
-  const maps =
-    args.mode === "smoke" ? ["CurveI.track"] : mapList.map((m) => m.file);
+  const maps = args.mapsOverride
+    ? args.mapsOverride
+    : args.mode === "smoke" ? ["CurveI.track"] : mapList.map((m) => m.file);
 
   const budget = budgetFor(args.mode, args.budget);
 
@@ -182,6 +207,31 @@ async function main() {
     process.stderr.write(`[research_eval] WARNING: config was clamped to bounds\n`);
   }
 
+  // Live status file the dashboard polls. Throttle writes so we don't
+  // hammer disk on every progress callback.
+  const STATUS_PATH = resolve(here, ".eval_status.json");
+  const writeStatus = (extra: Record<string, unknown>) => {
+    try {
+      writeFileSync(
+        STATUS_PATH,
+        JSON.stringify({
+          running: true,
+          mode: args.mode,
+          budget: args.budget,
+          maps: maps.length,
+          seeds: budget.seeds,
+          tag: args.tag,
+          started_at: startedAt,
+          ...extra,
+        }),
+      );
+    } catch {
+      // best effort
+    }
+  };
+  writeStatus({ phase: "starting" });
+  let lastStatusWrite = 0;
+
   const result = await runHarness({
     cfg: clampedCfg,
     maps,
@@ -189,19 +239,28 @@ async function main() {
     evalEpisodesPerMap: budget.evalEpisodesPerMap,
     seeds: budget.seeds,
     onProgress: ({ map, seed, phase, pct }) => {
-      // One progress line per map/seed/phase transition (don't spam).
-      // The runner can grep these to show liveness.
+      // One stderr line per map/seed/phase transition (don't spam).
       if (pct === 1.0 || (phase === "train" && pct >= 0.5 && pct < 0.55)) {
         process.stderr.write(
           `  ${map} seed=${seed} ${phase} ${(pct * 100).toFixed(0)}%\n`,
         );
       }
+      // Status file: throttle to every ~500 ms.
+      const now = Date.now();
+      if (now - lastStatusWrite > 500) {
+        writeStatus({ phase, current_map: map, current_seed: seed, pct });
+        lastStatusWrite = now;
+      }
     },
   });
+  writeStatus({ phase: "wrapping_up" });
 
   const score = medianBySeed(result);
   const meanScore = result.score;
-  const prior = priorBest(args.mode === "validate" ? VALIDATION_LOG_PATH : LOG_PATH);
+  const logPathToUse = args.logPath
+    ? resolve(args.logPath)
+    : args.mode === "validate" ? VALIDATION_LOG_PATH : LOG_PATH;
+  const prior = priorBest(logPathToUse);
 
   // Per-map summary for the JSONL. Aggregate across seeds.
   const perMapSummary = new Map<
@@ -260,8 +319,8 @@ async function main() {
     ),
   };
 
-  const logPath = args.mode === "validate" ? VALIDATION_LOG_PATH : LOG_PATH;
-  appendFileSync(logPath, JSON.stringify(row) + "\n");
+  appendFileSync(logPathToUse, JSON.stringify(row) + "\n");
+  writeStatus({ phase: "done", final_score: score });
 
   process.stderr.write(
     `[research_eval] done: score=${score.toFixed(4)} ` +

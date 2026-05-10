@@ -29,11 +29,13 @@ export default defineConfig({
     target: "es2022",
     rollupOptions: {
       input: {
-        // Two entry HTML files share the same module graph: the single-map
-        // training view and the multi-map grid trainer. Both depend on
-        // src/agent.ts, src/storage.ts, etc, which Vite/Rollup factor out.
+        // Three entry HTML files share the same module graph: single-map
+        // training, multi-map grid trainer, and the autoresearch
+        // dashboard. The dashboard only reads JSONL/status files; the
+        // loop itself runs as a Node CLI separately.
         main: path.resolve(__dirname, "index.html"),
         grid: path.resolve(__dirname, "grid.html"),
+        autoresearch: path.resolve(__dirname, "autoresearch.html"),
       },
     },
   },

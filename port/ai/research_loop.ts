@@ -71,6 +71,14 @@ interface CliArgs {
   /** If true, run one iteration WITHOUT calling an LLM - useful for
    *  testing the runner machinery against a fixed config. */
   dryRun: boolean;
+  /** Optional: comma-separated map filenames. Pass-through to
+   *  research_eval.ts so the loop can target a single map or any
+   *  custom subset. */
+  mapsCsv: string | null;
+  /** Optional: alternate JSONL log path. Lets us run a side experiment
+   *  (e.g., per-map loop on Watertankrun) without polluting the main
+   *  research_log.jsonl. */
+  logPath: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -84,6 +92,8 @@ function parseArgs(argv: string[]): CliArgs {
     plateauWindow: 50,
     validateEvery: 20,
     dryRun: false,
+    mapsCsv: null,
+    logPath: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -96,6 +106,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--plateau-window") out.plateauWindow = Number(argv[++i]);
     else if (a === "--validate-every") out.validateEvery = Number(argv[++i]);
     else if (a === "--dry-run") out.dryRun = true;
+    else if (a === "--maps") out.mapsCsv = argv[++i];
+    else if (a === "--log-path") out.logPath = argv[++i];
   }
   return out;
 }
@@ -109,9 +121,9 @@ interface LogRow {
   notes?: string;
 }
 
-function readLog(): LogRow[] {
-  if (!existsSync(LOG_PATH)) return [];
-  const lines = readFileSync(LOG_PATH, "utf8").trim().split(/\r?\n/);
+function readLog(logPath: string = LOG_PATH): LogRow[] {
+  if (!existsSync(logPath)) return [];
+  const lines = readFileSync(logPath, "utf8").trim().split(/\r?\n/);
   const rows: LogRow[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -235,20 +247,24 @@ async function validateProgram(programSrc: string): Promise<{ ok: true } | { ok:
  *  line) and a flag for whether it crashed. */
 function runEval(
   budget: CliArgs["budget"],
-  mode: "eval" | "validate" = "eval",
+  mode: "eval" | "validate" | "smoke" = "eval",
+  mapsCsv: string | null = null,
+  logPath: string | null = null,
 ): { score: number; ok: boolean; stderr: string } {
-  const result = spawnSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      resolve(here, "research_eval.ts"),
-      "--mode",
-      mode,
-      "--budget",
-      budget,
-    ],
-    { encoding: "utf8", maxBuffer: 100 * 1024 * 1024 },
-  );
+  const evalArgs = [
+    "--experimental-strip-types",
+    resolve(here, "research_eval.ts"),
+    "--mode",
+    mode,
+    "--budget",
+    budget,
+  ];
+  if (mapsCsv) evalArgs.push("--maps", mapsCsv);
+  if (logPath) evalArgs.push("--log-path", logPath);
+  const result = spawnSync(process.execPath, evalArgs, {
+    encoding: "utf8",
+    maxBuffer: 100 * 1024 * 1024,
+  });
   if (result.status !== 0) {
     return { score: -Infinity, ok: false, stderr: result.stderr };
   }
@@ -308,10 +324,11 @@ async function main() {
     `[loop] starting: max=${args.maxIterations} budget=${args.budget} dry-run=${args.dryRun}\n`,
   );
 
+  const effectiveLogPath = args.logPath ?? LOG_PATH;
   for (let iter = 1; iter <= args.maxIterations; iter++) {
     if (interrupted) break;
 
-    const rows = readLog();
+    const rows = readLog(effectiveLogPath);
     const stop = shouldStop(rows, args);
     if (stop.stop) {
       process.stderr.write(`[loop] STOP: ${stop.reason}\n`);
@@ -354,7 +371,12 @@ async function main() {
 
     // 5-6. Run eval, get score.
     const evalStart = Date.now();
-    const { score, ok, stderr } = runEval(args.budget, args.evalMode);
+    const { score, ok, stderr } = runEval(
+      args.budget,
+      args.evalMode,
+      args.mapsCsv,
+      args.logPath,
+    );
     const evalSecs = (Date.now() - evalStart) / 1000;
 
     if (!ok) {
@@ -384,7 +406,9 @@ async function main() {
     });
 
     // 8. Validation pass every N iterations (if score improved).
-    if (kept && iter % args.validateEvery === 0) {
+    // Skip validation when running on a custom map subset - the
+    // validation maps are decoupled from any single-map experiment.
+    if (kept && iter % args.validateEvery === 0 && !args.mapsCsv) {
       process.stderr.write(`[loop] running validation pass ...\n`);
       const valStart = Date.now();
       const valResult = runEval(args.budget, "validate");
