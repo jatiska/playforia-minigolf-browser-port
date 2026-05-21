@@ -313,8 +313,88 @@ async function main(): Promise<void> {
         }
         console.log("[OK] daily singleton stays counted after mid-game dropouts and re-entry");
 
-        c.close();
+        // Regression: day rollover with a sparse-id remaining player.
+        // Pre-fix: rotateIfNewDay sized the rebuilt playStatus by
+        // players.length, but a leftover sparse id (>= players.length) was
+        // truncated off the end. The remaining player's beginstroke gate
+        // (`playStatus.charAt(playerId) === 'f'`) silently rejected every
+        // shot, and the broadcast starttrack carried a too-short playStatus
+        // so the sparse client's `numPlayers < myPlayerId+1` made their own
+        // slot fall off the players array (their click handler bailed before
+        // even sending beginstroke). Either way, "the map changes after day
+        // rollover but the ball doesn't move at all" — the user-reported
+        // symptom. F just rejoined above (id=0) — close F and bring in G/H
+        // to set up a sparse remainder, then fake the rollover and verify a
+        // shot from the sparse occupant lands.
         f.close();
+        await new Promise((r) => setTimeout(r, 250));
+
+        const g = new Client("G");
+        const h = new Client("H");
+        await Promise.all([g.open(), h.open()]);
+        await login(g);
+        await login(h);
+        await enterDaily(g);
+        await enterDaily(h);
+        const gOwn = await g.waitFor((s) => /^d \d+ game\towninfo\t/.test(s), "G owninfo");
+        const hOwn = await h.waitFor((s) => /^d \d+ game\towninfo\t/.test(s), "H owninfo");
+        const gid = parseInt(gOwn.split("\t")[2] ?? "-1", 10);
+        const hid = parseInt(hOwn.split("\t")[2] ?? "-1", 10);
+        if (gid !== 0 || hid !== 1) {
+            throw new Error(`G/H entered with ids=${gid}/${hid}; want 0/1`);
+        }
+        // G leaves first: H stays alone with sparse id=1.
+        g.sendData("game", "back");
+        await g.waitFor((s) => /^d \d+ status\tlobbyselect\t/.test(s), "G back");
+
+        // Fake the UTC date rollover by rewinding dailyGame.dateKey. The next
+        // getDailyGame() call (any daily-select) will trip rotateIfNewDay.
+        const dgRef = (server.golfServer as unknown as { dailyGame: { dateKey: string } }).dailyGame;
+        const stashedDate = dgRef.dateKey;
+        dgRef.dateKey = "1999-01-01";
+
+        // I joins → rotation fires with H (id=1) still in the room.
+        const iCli = new Client("I");
+        await iCli.open();
+        await login(iCli);
+        await enterDaily(iCli);
+
+        // H receives the rotation's broadcast starttrack. Post-fix the buff is
+        // length=numberIndex (>= H.id+1) so H's client sees their own slot.
+        const hStartTrack = await h.waitFor((s) => /^d \d+ game\tstarttrack\t/.test(s), "H rollover starttrack");
+        const hStartPlayStatus = hStartTrack.split("\t")[2] ?? "";
+        if (hStartPlayStatus.length <= hid) {
+            throw new Error(
+                `rotation starttrack to sparse-id H carried playStatus="${hStartPlayStatus}" ` +
+                `(length ${hStartPlayStatus.length}) — H's slot id=${hid} falls off the end. ` +
+                `Pre-fix bug: broadcastStartTrack sized buff by players.length not numberIndex.`,
+            );
+        }
+
+        // H tries to shoot. Pre-fix the server's beginstroke gate silently
+        // rejected (playStatus too short for H's id). Reuse the encoded
+        // ball/mouse coords from the earlier A-shoots-B-shoots phase.
+        h.sendData("game", "beginstroke", ball, mouseA);
+        const echo = await Promise.race([
+            h.waitFor((s) => new RegExp(`^d \\d+ game\\tbeginstroke\\t${hid}\\t`).test(s), "H shot echo", 1500)
+                .then((s) => ({ ok: true as const, s })),
+            new Promise<{ ok: false }>((resolve) => setTimeout(() => resolve({ ok: false }), 1500)),
+        ]);
+        if (!echo.ok) {
+            throw new Error(
+                `H (sparse id=${hid}) beginstroke silently dropped after day rollover. ` +
+                `Pre-fix bug: rotateIfNewDay set playStatus = "f".repeat(players.length=1) = "f"; ` +
+                `charAt(${hid}) of "f" = "" so the gate rejected.`,
+            );
+        }
+        console.log("[OK] day rollover with sparse-id occupant: shot lands post-rotation");
+
+        // Restore for any later assertions / clean exit.
+        dgRef.dateKey = stashedDate;
+        g.close();
+        h.close();
+        iCli.close();
+
         a.close();
         b.close();
         console.log("\nALL DAILY-CHALLENGE PHASES PASSED");

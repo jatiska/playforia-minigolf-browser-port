@@ -1160,12 +1160,36 @@ export class DailyGame extends GolfGame {
         if (this.dateKey === currentDateKey) return;
         this.dateKey = currentDateKey;
         this.tracks = [this.dailyTrackManager.getDailyTrack(currentDateKey)];
-        for (let i = 0; i < this.players.length; i++) {
-            this.playerStrokesThisTrack[i] = 0;
-            this.playerStrokesTotal[i] = 0;
-        }
         this.strokeSeedCounter = 0;
-        this.playStatus = "f".repeat(this.players.length);
+        if (this.players.length === 0) {
+            // Empty room: full reset so any state from yesterday's occupants
+            // (sparse-id leftovers in playStatus / strokes / numberIndex) can't
+            // poison tomorrow's first joiner. Mirrors joinDaily's empty-room
+            // branch — doing it here too means the rotation is self-contained
+            // regardless of whether joinDaily fires immediately after.
+            this.numberIndex = 0;
+            this.playStatus = "";
+            for (let i = 0; i < this.playerStrokesThisTrack.length; i++) {
+                this.playerStrokesThisTrack[i] = 0;
+                this.playerStrokesTotal[i] = 0;
+            }
+        } else {
+            // Non-empty room: ids are sparse (a finisher who left still owned a
+            // slot in playStatus). Size playStatus and the reset loop by
+            // numberIndex (= one past the max id), NOT players.length — a
+            // remaining player whose id is past players.length-1 would have
+            // their slot truncated off the end and the beginstroke gate
+            // (`playStatus.charAt(playerId) === 'f'`) would silently reject
+            // every shot, AND the broadcast starttrack would carry a too-short
+            // playStatus that makes the sparse-id client compute
+            // `numPlayers < myPlayerId+1` so their own ball slot falls off
+            // their players array and the click handler bails.
+            for (let i = 0; i < this.numberIndex; i++) {
+                this.playerStrokesThisTrack[i] = 0;
+                this.playerStrokesTotal[i] = 0;
+            }
+            this.playStatus = "f".repeat(this.numberIndex);
+        }
         // Re-broadcast a fresh starttrack so everyone resets to spawn.
         this.broadcastStartTrack();
     }
@@ -1224,7 +1248,12 @@ export class DailyGame extends GolfGame {
     /** Re-broadcast starttrack to everyone (used after a day rotation). */
     private broadcastStartTrack(): void {
         const stats = this.dailyTrackManager.getStats(this.tracks[0]);
-        const buff = "f".repeat(this.players.length);
+        // Sparse ids: size buff by numberIndex (= max id + 1), not
+        // players.length. A sparse player whose id is past players.length-1
+        // would get a too-short playStatus, set `numPlayers < myPlayerId+1`
+        // on their client, and their own slot would fall off the players
+        // array — their click handler then bails and the ball never moves.
+        const buff = "f".repeat(Math.max(this.numberIndex, this.players.length));
         this.writeAll(tabularize("game", "resetvoteskip"));
         this.markTrackStart();
         this.writeAll(this.formatStartTrack(buff, stats));
