@@ -284,6 +284,30 @@ export abstract class Game {
     sendReconnectResync(_player: Player): void {
         // no-op
     }
+
+    /**
+     * Hook called by the server when a player's socket dies AND they're
+     * mid-game. Lets the per-game subclass do whatever bookkeeping is needed
+     * so peers aren't blocked while the disconnect-grace window runs:
+     * GolfGame synthesizes a forfeit so the hole's playStatus closes out;
+     * MultiGame additionally advances the turn pointer if the disconnected
+     * player held it. Default no-op.
+     */
+    handlePlayerDisconnect(_player: Player): void {
+        // no-op
+    }
+
+    /**
+     * True when the player occupying `slot` has a pending disconnect-grace
+     * window. Used by pacing checks (allDoneOnCurrentTrack, voteSkip,
+     * nextEligibleTurn, assignFirstTurn) so a transiently-offline player's
+     * 'f' slot doesn't block hole completion or turn advancement.
+     */
+    protected isSlotDisconnected(slot: number): boolean {
+        const idx = this.playersNumber.indexOf(slot);
+        if (idx < 0) return false;
+        return this.players[idx]?.disconnectedAt != null;
+    }
 }
 
 export class GolfGame extends Game {
@@ -560,22 +584,89 @@ export class GolfGame extends Game {
     }
 
     /**
-     * Override of the base hook: send the reconnecting player a fresh
-     * `game tracktick <elapsedMs>` so their local `trackStartedAtMs`
-     * re-anchors to the server's clock. The client's `performance.now()`
-     * survives a WS reconnect, but if the OS suspended (laptop sleep)
-     * during the disconnect, the local clock paused and `worldTick` is
-     * now behind. Recalibrating closes that gap.
+     * Override of the base hook: rebuild the reconnecting player's view of
+     * the room. The grace window may have outlasted a hole (peers finished
+     * without them, the room advanced), so we can't just patch the world
+     * clock - we have to resend the current `starttrack`, replay finished
+     * peers' scoreboard entries, and (for subclasses) restore practice or
+     * turn state. The base `tracktick` is implicit in `formatStartTrack`,
+     * which carries `E <elapsedMs>` so the client recomputes
+     * `trackStartedAtMs` from its own `performance.now()` - that survives
+     * laptop sleep the same way the standalone `tracktick` did.
      *
-     * No-op when the track hasn't started yet (defensive; the server
-     * doesn't grant grace mid-game today, but the hook is in place for the
-     * future mid-game-grace feature noted in KNOWN_ISSUES).
+     * No-op when the track hasn't started yet (room still waiting in
+     * lobby-like state). Subclasses override for daily/practice variants.
      */
     override sendReconnectResync(player: Player): void {
         if (this.trackStartedAtMs === 0) return;
-        player.connection.sendDataRaw(
-            tabularize("game", "tracktick", Math.floor(this.trackElapsedMs())),
-        );
+        this.sendReconnectCatchup(player);
+    }
+
+    /**
+     * Send the reconnecting player the current track + scoreboard. Unlike
+     * `MultiGame.sendCurrentTrackTo` (used by fresh late-joiners), this does
+     * NOT wipe the player's own slot - they may already be 'p' on this hole
+     * from `handlePlayerDisconnect`'s synthesized forfeit, and the scoreboard
+     * needs to reflect that. Includes their own slot in the endstroke replay.
+     */
+    protected sendReconnectCatchup(player: Player): void {
+        const slotId = this.getPlayerId(player);
+        if (slotId < 0) return;
+        const track = this.tracks[this.currentTrack];
+        if (!track) return;
+        const stats = this.trackManager.getStats(track);
+        // Width of buff matches existing playStatus length so the client's
+        // numPlayers derivation stays consistent with peers' view.
+        const buff = "f".repeat(Math.max(this.playStatus.length, this.players.length));
+        player.connection.sendDataRaw(tabularize("game", "start"));
+        player.connection.sendDataRaw(tabularize("game", "resetvoteskip"));
+        // Personal late-resend: do NOT reset trackStartedAtMs - the player
+        // picks up the existing shared clock via the `E <elapsedMs>` field.
+        player.connection.sendDataRaw(this.formatStartTrack(buff, stats));
+        // Replay completion state for every finished slot (including the
+        // reconnecting player's own, since they may have been forfeited on
+        // disconnect and their client doesn't know yet).
+        for (let i = 0; i < this.playStatus.length; i++) {
+            const status = this.playStatus.charAt(i);
+            if (status === "t" || status === "p") {
+                const strokes = this.playerStrokesThisTrack[i] ?? 0;
+                player.connection.sendDataRaw(
+                    tabularize("game", "endstroke", i, strokes, status),
+                );
+            }
+        }
+    }
+
+    /**
+     * Mid-game disconnect hook: synthesize a forfeit for the current hole
+     * so peers' `allDoneOnCurrentTrack` doesn't deadlock on this player's
+     * 'f' slot (and any ball-in-motion stroke they were taking resolves
+     * cleanly on the scoreboard). The player record stays alive in
+     * `reconnectTimers`-managed grace; their slot on the NEXT hole (after
+     * `nextTrack` resets to 'f') is protected by `isSlotDisconnected` in
+     * the same pacing checks.
+     *
+     * Idempotent against 't'/'p' (already-finished) slots - relevant when a
+     * player finishes the hole, then immediately disconnects.
+     */
+    override handlePlayerDisconnect(player: Player): void {
+        const id = this.getPlayerId(player);
+        if (id < 0) return;
+        const cur = this.playStatus.charAt(id);
+        if (cur === "t" || cur === "p") return;
+        const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
+        this.playerStrokesThisTrack[id] = cap;
+        const psArr = this.playStatus.split("");
+        while (psArr.length < this.players.length) psArr.push("f");
+        psArr[id] = "p";
+        this.playStatus = psArr.join("");
+        this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
+        // Clear any pending skip votes (the unfinished set just shrank) and
+        // advance the track if this disconnect was the last 'f' anyone was
+        // waiting on. Subclasses' nextTrack overrides handle the rest
+        // (MultiGame reassigns first turn; DailyGame is a no-op).
+        if (!this.allDoneOnCurrentTrack()) this.resetSkipVotesIfAny();
+        if (this.allDoneOnCurrentTrack()) this.nextTrack();
     }
 
     /**
@@ -798,6 +889,10 @@ export class GolfGame extends Game {
         // playersNumber but their connection is gone.
         for (const p of this.players) {
             if (p.game !== this) continue;
+            // Players in disconnect-grace can't reply to snapreq; including
+            // them only delays resolution to the timeout. Filter so quorum
+            // shrinks to actually-reachable observers.
+            if (p.disconnectedAt != null) continue;
             const pid = this.getPlayerId(p);
             if (pid >= 0) expected.add(pid);
         }
@@ -979,8 +1074,13 @@ export class GolfGame extends Game {
     }
 
     private allDoneOnCurrentTrack(): boolean {
-        for (const c of this.playStatus) {
-            if (c === "f") return false;
+        for (let s = 0; s < this.playStatus.length; s++) {
+            if (this.playStatus[s] !== "f") continue;
+            // Skip slots whose owner is currently in disconnect-grace. Their
+            // 'f' is "reserved" - peers shouldn't have to wait 250s for grace
+            // to expire just to roll over to the next hole.
+            if (this.isSlotDisconnected(s)) continue;
+            return false;
         }
         return true;
     }
@@ -998,6 +1098,15 @@ export class GolfGame extends Game {
         p.hasSkipped = true;
         this.writeExcluding(p, tabularize("game", "voteskip", this.getPlayerId(p)));
         for (const player of this.players) {
+            // Disconnected players count as implicit-skipped so survivors can
+            // pass a skip vote without waiting 250s for grace to expire.
+            // Deliberate race: if a player reconnects between two peers'
+            // votes, the existing `hasSkipped=false` for the returning
+            // player means the vote no longer passes - survivors have to
+            // re-vote with the returnee included. Acceptable: skip vote is
+            // a low-stakes hole-advance gesture, and the returnee deserves
+            // a say in whether the room moves on without them.
+            if (player.disconnectedAt != null) continue;
             if (!player.hasSkipped && this.playStatus.charAt(this.getPlayerId(player)) === "f") return;
         }
         // Vote passed - cap any player still mid-track at the stroke limit
@@ -1068,6 +1177,30 @@ export class GolfGame extends Game {
     }
 
     protected nextTrack(): void {
+        // Cap any disconnect-graced players still on 'f' for the just-
+        // completed hole BEFORE the accumulator runs - otherwise their
+        // `playerStrokesThisTrack` is 0 (they never shot) and
+        // `playerStrokesTotal` gains nothing for this hole. Without this,
+        // a player who disconnects on hole 1 and stays gone through holes
+        // 2..N would effectively score 0 on holes 2..N - a free pass good
+        // enough to "win" by going offline. `handlePlayerDisconnect`
+        // handles the same shape on the initial drop hole; this loop
+        // re-applies it to subsequent holes the player is missing. The
+        // broadcast `endstroke 'p'` also fills peers' scoreboard so the
+        // missed hole reads as DNF rather than a blank cell.
+        for (const p of this.players) {
+            if (p.disconnectedAt == null) continue;
+            const id = this.getPlayerId(p);
+            if (id < 0) continue;
+            if (this.playStatus.charAt(id) !== "f") continue;
+            const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
+            this.playerStrokesThisTrack[id] = cap;
+            const psArr = this.playStatus.split("");
+            while (psArr.length < this.players.length) psArr.push("f");
+            psArr[id] = "p";
+            this.playStatus = psArr.join("");
+            this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
+        }
         this.strokeCounter = 0;
         this.currentTrack++;
         for (let i = 0; i < this.players.length; i++) {
@@ -1324,6 +1457,25 @@ export class DailyGame extends GolfGame {
             return true;
         }
         return super.handlePacket(player, fields);
+    }
+
+    /**
+     * Reconnect resync for the daily room: re-emit `dailymode` after the
+     * base catchup so the client renders ghost/share UI, and if the player
+     * already finished (or was forfeited on disconnect) re-send `game end`
+     * so the share dialog appears for the run they completed/missed.
+     */
+    override sendReconnectResync(player: Player): void {
+        super.sendReconnectResync(player);
+        if (this.trackStartedAtMs === 0) return;
+        player.connection.sendDataRaw(tabularize("game", "dailymode", this.dateKey));
+        const slotId = this.getPlayerId(player);
+        if (slotId >= 0) {
+            const status = this.playStatus.charAt(slotId);
+            if (status === "t" || status === "p") {
+                player.connection.sendData("game", "end");
+            }
+        }
     }
 
     /**
@@ -1642,7 +1794,12 @@ export class MultiGame extends GolfGame {
         }
         for (let n = 0; n < ids.length; n++) {
             const id = ids[(startIdx + n) % ids.length];
-            if (this.playStatus.charAt(id) === "f") return id;
+            if (this.playStatus.charAt(id) !== "f") continue;
+            // Skip slots in disconnect-grace - their owner can't shoot
+            // right now; the turn moves on without them. If they reconnect
+            // before the hole ends, they'll be eligible on the next round.
+            if (this.isSlotDisconnected(id)) continue;
+            return id;
         }
         return -1;
     }
@@ -1683,11 +1840,14 @@ export class MultiGame extends GolfGame {
         // so this is just `ids[0]`. Defensive iteration anyway in case a
         // future code path lands here with a partially-filled playStatus.
         for (const id of ids) {
-            if (this.playStatus.charAt(id) === "f") {
-                this.currentTurn = id;
-                this.broadcast(tabularize("game", "startturn", id));
-                return;
-            }
+            if (this.playStatus.charAt(id) !== "f") continue;
+            // Skip disconnect-grace slots - assigning the turn to someone who
+            // can't shoot would stall the room until grace expires (or until
+            // they reconnect, but that may be after peers finish the hole).
+            if (this.isSlotDisconnected(id)) continue;
+            this.currentTurn = id;
+            this.broadcast(tabularize("game", "startturn", id));
+            return;
         }
         this.currentTurn = -1;
     }
@@ -1865,6 +2025,47 @@ export class MultiGame extends GolfGame {
         const wasTrack = this.currentTrack;
         super.forfeit(player);
         if (this.currentTrack === wasTrack) this.advanceTurn(id);
+    }
+
+    /**
+     * Mid-game disconnect for MultiGame: the base GolfGame override
+     * synthesizes a forfeit on the current hole; additionally we have to
+     * yield the turn pointer if the disconnected player held it, so peers
+     * in turn-based rooms aren't blocked waiting for a shot that will
+     * never come. Skipped in practice (free-play - no turn gate).
+     */
+    override handlePlayerDisconnect(player: Player): void {
+        const id = this.getPlayerId(player);
+        const wasTrack = this.currentTrack;
+        const wasTheirTurn = this.turnBased && !this.practiceActive && this.currentTurn === id;
+        super.handlePlayerDisconnect(player);
+        // If `super` already kicked us to the next hole (everyone present
+        // was done after the synthesized forfeit), `nextTrack` will have
+        // run `assignFirstTurn` for the fresh hole - no further advance.
+        if (wasTheirTurn && this.currentTrack === wasTrack) this.advanceTurn(id);
+    }
+
+    /**
+     * Reconnect resync for MultiGame: full track replay plus turn / practice
+     * state. The base `GolfGame.sendReconnectResync` sends `start`/
+     * `resetvoteskip`/`starttrack` + per-slot endstroke replays; on top we
+     * add the room-specific bits a fresh `sendCurrentTrackTo` would have
+     * sent (turn pointer for turn-based, practicemode flag if practicing).
+     */
+    override sendReconnectResync(player: Player): void {
+        if (this.practiceActive) {
+            // Practice rooms don't track per-hole progression - resending
+            // the practice track + practicemode flag is the right catchup
+            // shape. Slot stamp to 'f' is fine in practice.
+            this.sendPracticeTrackTo(player);
+            return;
+        }
+        super.sendReconnectResync(player);
+        if (this.turnBased && this.currentTurn >= 0 && this.trackStartedAtMs !== 0) {
+            player.connection.sendDataRaw(
+                tabularize("game", "startturn", this.currentTurn),
+            );
+        }
     }
 
     /** During practice each hole-in / forfeit-all advances to a fresh random

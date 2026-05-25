@@ -123,20 +123,25 @@ export class GolfServer {
         // don't tear down the player record we just rescued.
         if (player.connection !== conn) return;
 
-        // Mid-game disconnect: peers are waiting on this player's `endstroke`,
-        // so we can't keep them logically present. Fall through to immediate
-        // cleanup as before. (Reconnect mid-game is a deferred follow-up - see
-        // KNOWN_ISSUES.)
-        if (player.game) {
-            this.fullyRemovePlayer(player, "in_game");
-            return;
-        }
-
-        // Lobby/lobbyselect: defer cleanup so a brief network blip doesn't
-        // cost the player their lobby slot. Cancelled by `handleReconnect`.
+        // Defer cleanup for everyone (lobby, lobbyselect, mid-game) so a
+        // brief network blip doesn't cost the player their seat. Mid-game
+        // gets the same 250s grace window the connect-handshake banner
+        // advertises; without this, peers' simulation would have to wait on
+        // a player who silently dropped while their slot stays 'f' in
+        // playStatus. We mark `disconnectedAt` BEFORE the per-game hook so
+        // the pacing checks (`allDoneOnCurrentTrack`, `nextEligibleTurn`,
+        // `assignFirstTurn`, `voteSkip`) treat this player's 'f' slot as
+        // reserved-but-skippable for the rest of this hole.
         const existing = this.reconnectTimers.get(player.id);
         if (existing) clearTimeout(existing);
         player.disconnectedAt = Date.now();
+        if (player.game) {
+            try {
+                player.game.handlePlayerDisconnect(player);
+            } catch (err) {
+                console.error("[disconnect] handlePlayerDisconnect failed:", err);
+            }
+        }
         const timer = setTimeout(() => {
             this.reconnectTimers.delete(player.id);
             // Re-check: a successful reconnect would have cleared
