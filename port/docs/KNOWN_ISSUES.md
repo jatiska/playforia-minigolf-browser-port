@@ -61,15 +61,22 @@ Things we deferred for MVP that the original Java game has:
   through 4 aim modes (solid + 3 dashed-line rotations). We only have mode 0.
 - **Rating tracks.** Server stub exists (`game rate <track> <rating>`) but
   no UI; ratings aren't persisted (FileSystemStatsManager is read-only).
-- **Mid-game reconnect.** Lobby/lobbyselect reconnect-after-blip is now
-  implemented (see PROTOCOL.md "Reconnect after network blip"), but a
-  mid-game disconnect still falls through to immediate cleanup. Honoring
-  grace mid-stroke is non-trivial: peers are waiting on this player's
-  `endstroke` to advance the game, so the grace window has to either
-  auto-forfeit the in-flight stroke or model "disconnected but
-  reserved" with a separate stroke-timeout. Files: `port/server/src/
-  server.ts` (`handleDisconnect` early-returns to `fullyRemovePlayer`
-  when `player.game !== null`).
+- **Mid-game reconnect — partial.** Mid-game disconnect now defers cleanup
+  via the same 250s grace window as lobby/lobbyselect. The disconnected
+  player's current hole is auto-forfeited (`'p'` slot) on disconnect so peers
+  aren't blocked, and `allDoneOnCurrentTrack` / `nextEligibleTurn` /
+  `assignFirstTurn` / `voteSkip` all treat in-grace slots as reserved-but-
+  skippable on the NEXT hole too (so peers can roll through several holes
+  while the disconnect is pending). On reconnect, the player gets a full
+  catchup (current track + scoreboard, plus turn pointer / dailymode /
+  practicemode where relevant) instead of just `tracktick`. Limitations
+  worth knowing: (1) the disconnected player loses any hole that was
+  in-progress when their socket died — no "rewind to before the stroke";
+  (2) per-hole stroke counts for holes the player missed entirely are
+  recorded as `maxStrokes` (or current+1 if no cap) and aren't recoverable
+  on reconnect — same shape as the existing fresh-late-joiner gap. Files:
+  `port/server/src/server.ts` (`handleDisconnect`), `port/server/src/game.ts`
+  (`handlePlayerDisconnect`, `sendReconnectCatchup`, `isSlotDisconnected`).
 - **Daily mode: resting-ghost sync for late joiners.** When a player joins the
   daily room mid-play, they see existing players' balls at the spawn position
   rather than wherever those balls have actually come to rest. The next stroke
