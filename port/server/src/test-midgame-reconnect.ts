@@ -1,4 +1,4 @@
-// Regression test for mid-game disconnect grace + reconnect resync (PR #63).
+// Regression tests for mid-game disconnect grace + reconnect resync (PR #63).
 //
 // Pre-fix: in-game disconnects called fullyRemovePlayer immediately, so a
 // brief network blip cost the player their seat and left peers blocked on
@@ -19,7 +19,6 @@ import * as path from "node:path";
 import { WebSocket } from "ws";
 import { startServer, type RunningServer } from "./main.ts";
 
-const PORT = 4250;
 const HOST = "127.0.0.1";
 
 function tracksDir(): string {
@@ -32,10 +31,12 @@ class Client {
     ws: WebSocket;
     outSeq = 0;
     received: string[] = [];
+    port: number;
 
-    constructor(name: string) {
+    constructor(name: string, port: number) {
         this.name = name;
-        this.ws = new WebSocket(`ws://${HOST}:${PORT}/ws`);
+        this.port = port;
+        this.ws = new WebSocket(`ws://${HOST}:${port}/ws`);
         this.ws.on("message", (m) => this.received.push(m.toString()));
     }
     async open(): Promise<void> {
@@ -69,16 +70,6 @@ class Client {
             tick();
         });
     }
-    drain(predicate: (s: string) => boolean): string[] {
-        const out: string[] = [];
-        const keep: string[] = [];
-        for (const s of this.received) {
-            if (predicate(s)) out.push(s);
-            else keep.push(s);
-        }
-        this.received = keep;
-        return out;
-    }
     hardDisconnect(): void {
         this.ws.terminate();
     }
@@ -111,8 +102,8 @@ async function enterMulti(c: Client): Promise<void> {
     await c.waitFor((s) => /^d \d+ lobby\tgamelist\tfull/.test(s), "gamelist full");
 }
 
-async function reconnectViaOld(name: string, playerId: number): Promise<Client> {
-    const c = new Client(name);
+async function reconnectViaOld(name: string, port: number, playerId: number): Promise<Client> {
+    const c = new Client(name, port);
     await c.open();
     await c.waitFor((s) => s === "h 1", "h 1");
     await c.waitFor((s) => s.startsWith("c crt"), "c crt");
@@ -122,65 +113,58 @@ async function reconnectViaOld(name: string, playerId: number): Promise<Client> 
     return c;
 }
 
+async function startTwoPlayerGame(a: Client, b: Client): Promise<string> {
+    a.sendData("lobby", "cmpt", "MidReconnect", "-", 0, 2, 2, 1, 3, 60, 0, 1, 0, 0);
+    const addLine = await b.waitFor((s) => /^d \d+ lobby\tgamelist\tadd/.test(s), "B gamelist add");
+    const gameId = parseInt(addLine.split("\t")[3] ?? "0", 10);
+    b.sendData("lobby", "jmpt", String(gameId));
+    await a.waitFor((s) => /^d \d+ game\tstart$/.test(s), "A game start");
+    await b.waitFor((s) => /^d \d+ game\tstart$/.test(s), "B game start");
+    const t1 = await a.waitFor((s) => /^d \d+ game\tstarttrack/.test(s), "A starttrack 1");
+    await b.waitFor((s) => /^d \d+ game\tstarttrack/.test(s), "B starttrack 1");
+    return t1;
+}
+
 const ENC = (200 * 1500 + 200 * 4 + 0).toString(36).padStart(4, "0");
 const MOUSE = (300 * 1500 + 250 * 4 + 0).toString(36).padStart(4, "0");
 
-async function main(): Promise<void> {
+/** Scenario 1: reconnect catchup while the match is still in progress. */
+async function testReconnectCatchup(port: number): Promise<void> {
     let server: RunningServer | null = null;
     try {
-        server = await startServer({ host: HOST, port: PORT, tracksDir: tracksDir(), verbose: false });
-        console.log("[server] up");
+        server = await startServer({ host: HOST, port, tracksDir: tracksDir(), verbose: false });
+        console.log("\n[scenario 1] reconnect catchup on hole 2");
 
-        const a = new Client("A");
-        let b = new Client("B");
+        const a = new Client("A", port);
+        const b = new Client("B", port);
         await Promise.all([a.open(), b.open()]);
 
         const bPlayerId = await login(b);
         await login(a);
         await enterMulti(a);
         await enterMulti(b);
-        console.log("[OK] both logged in (B playerId=", bPlayerId, ")");
 
-        // 2-player, 2-track, maxStrokes=3.
-        a.sendData("lobby", "cmpt", "MidReconnect", "-", 0, 2, 2, 1, 3, 60, 0, 1, 0, 0);
-        const addLine = await b.waitFor((s) => /^d \d+ lobby\tgamelist\tadd/.test(s), "B gamelist add");
-        const gameId = parseInt(addLine.split("\t")[3] ?? "0", 10);
-        b.sendData("lobby", "jmpt", String(gameId));
-        await a.waitFor((s) => /^d \d+ game\tstart$/.test(s), "A game start");
-        await b.waitFor((s) => /^d \d+ game\tstart$/.test(s), "B game start");
-        const t1 = await a.waitFor((s) => /^d \d+ game\tstarttrack/.test(s), "A starttrack 1");
-        await b.waitFor((s) => /^d \d+ game\tstarttrack/.test(s), "B starttrack 1");
-        console.log("[OK] 2-track game started on hole 1");
+        const t1 = await startTwoPlayerGame(a, b);
 
-        // Hole 1: A holes in while B is still playing.
         a.sendData("game", "beginstroke", ENC, MOUSE);
         await a.waitFor((s) => /^d \d+ game\tbeginstroke\t0\t/.test(s), "A sees own stroke");
         await b.waitFor((s) => /^d \d+ game\tbeginstroke\t0\t/.test(s), "B sees A's stroke");
         a.sendData("game", "endstroke", 0, "tf");
         await a.waitFor((s) => /^d \d+ game\tendstroke\t0\t1\tt$/.test(s), "A holed");
         await b.waitFor((s) => /^d \d+ game\tendstroke\t0\t1\tt$/.test(s), "B sees A holed");
-        console.log("[OK] A holed on track 1; B still on 'f'");
 
-        // B drops mid-hole. Server must synthesize a forfeit and NOT remove
-        // the player record (grace window).
         b.hardDisconnect();
         await new Promise((r) => setTimeout(r, 150));
-
         await a.waitFor(
             (s) => /^d \d+ game\tendstroke\t1\t3\tp$/.test(s),
             "A sees B's disconnect forfeit on hole 1",
         );
-        console.log("[OK] B's mid-game disconnect synthesized endstroke 'p'");
-
-        // Both done on hole 1 → room advances without waiting 250s.
         await a.waitFor(
             (s) => /^d \d+ game\tstarttrack/.test(s) && s !== t1,
             "A starttrack 2 after B forfeit",
         );
-        console.log("[OK] track advanced to hole 2 while B is in grace");
 
-        // B reconnects on hole 2. Server must replay track state catchup.
-        const b2 = await reconnectViaOld("B-recon", bPlayerId);
+        const b2 = await reconnectViaOld("B-recon", port, bPlayerId);
         await b2.waitFor((s) => /^d \d+ game\tstart$/.test(s), "B catchup game start");
         await b2.waitFor((s) => /^d \d+ game\tresetvoteskip$/.test(s), "B catchup resetvoteskip");
         const catchupTrack = await b2.waitFor(
@@ -190,17 +174,13 @@ async function main(): Promise<void> {
         if (!catchupTrack.includes("\tE ")) {
             throw new Error(`reconnect starttrack missing elapsed field E: ${catchupTrack}`);
         }
-        console.log("[OK] B reconnected with full track catchup on hole 2");
 
-        // Post-reconnect sanity: server still honours DATA from the reattached player.
         b2.sendData("game", "cursor", 10, 20);
         await a.waitFor(
             (s) => /^d \d+ game\tcursor\t1\t10\t20$/.test(s),
             "A sees B's post-reconnect cursor",
         );
-        console.log("[OK] reattached B can send game packets");
 
-        // Hole 2: A holes in. B is connected again and should see broadcasts.
         a.sendData("game", "beginstroke", ENC, MOUSE);
         await a.waitFor((s) => /^d \d+ game\tbeginstroke\t0\t/.test(s), "A stroke hole 2");
         await b2.waitFor((s) => /^d \d+ game\tbeginstroke\t0\t/.test(s), "B sees A stroke hole 2");
@@ -208,25 +188,84 @@ async function main(): Promise<void> {
         await a.waitFor((s) => /^d \d+ game\tendstroke\t0\t1\tt$/.test(s), "A holed hole 2");
         await b2.waitFor((s) => /^d \d+ game\tendstroke\t0\t1\tt$/.test(s), "B sees A holed hole 2");
 
-        // B still mid-hole on track 2 - finish with a forfeit to end the game.
         b2.sendData("game", "forfeit");
         await b2.waitFor((s) => /^d \d+ game\tendstroke\t1\t3\tp$/.test(s), "B forfeit hole 2");
         await a.waitFor((s) => /^d \d+ game\tendstroke\t1\t3\tp$/.test(s), "A sees B forfeit hole 2");
         await a.waitFor((s) => /^d \d+ game\tend$/.test(s), "A game end");
         await b2.waitFor((s) => /^d \d+ game\tend$/.test(s), "B game end");
-        console.log("[OK] match completed after mid-game reconnect");
 
         a.close();
         b2.close();
+        console.log("[OK] scenario 1 passed");
+    } finally {
+        if (server) {
+            try { await server.close(); } catch { /* */ }
+        }
+    }
+}
+
+/** Scenario 2: offline player gets maxStrokes on a missed hole, not zero. */
+async function testOfflineScoreCap(port: number): Promise<void> {
+    let server: RunningServer | null = null;
+    try {
+        server = await startServer({ host: HOST, port, tracksDir: tracksDir(), verbose: false });
+        console.log("\n[scenario 2] offline score cap on missed hole");
+
+        const a = new Client("A", port);
+        const b = new Client("B", port);
+        await Promise.all([a.open(), b.open()]);
+
+        await login(b);
+        await login(a);
+        await enterMulti(a);
+        await enterMulti(b);
+
+        const t1 = await startTwoPlayerGame(a, b);
+
+        a.sendData("game", "beginstroke", ENC, MOUSE);
+        await a.waitFor((s) => /^d \d+ game\tbeginstroke\t0\t/.test(s), "A sees own stroke");
+        a.sendData("game", "endstroke", 0, "tf");
+        await a.waitFor((s) => /^d \d+ game\tendstroke\t0\t1\tt$/.test(s), "A holed");
+
+        b.hardDisconnect();
+        await new Promise((r) => setTimeout(r, 150));
+        await a.waitFor(
+            (s) => /^d \d+ game\tendstroke\t1\t3\tp$/.test(s),
+            "A sees B's disconnect forfeit on hole 1",
+        );
+        await a.waitFor(
+            (s) => /^d \d+ game\tstarttrack/.test(s) && s !== t1,
+            "A starttrack 2",
+        );
+
+        a.sendData("game", "beginstroke", ENC, MOUSE);
+        await a.waitFor((s) => /^d \d+ game\tbeginstroke\t0\t/.test(s), "A stroke hole 2");
+        a.sendData("game", "endstroke", 0, "tf");
+        await a.waitFor((s) => /^d \d+ game\tendstroke\t0\t1\tt$/.test(s), "A holed hole 2");
+        await a.waitFor(
+            (s) => /^d \d+ game\tendstroke\t1\t3\tp$/.test(s),
+            "A sees B capped at maxStrokes on missed hole 2",
+        );
+        await a.waitFor((s) => /^d \d+ game\tend$/.test(s), "A game end");
+
+        a.close();
+        console.log("[OK] scenario 2 passed");
+    } finally {
+        if (server) {
+            try { await server.close(); } catch { /* */ }
+        }
+    }
+}
+
+async function main(): Promise<void> {
+    try {
+        await testReconnectCatchup(4250);
+        await testOfflineScoreCap(4251);
         console.log("\nALL MID-GAME RECONNECT PHASES PASSED");
         process.exit(0);
     } catch (err) {
         console.error("FAIL:", err);
         process.exit(1);
-    } finally {
-        if (server) {
-            try { await server.close(); } catch { /* */ }
-        }
     }
 }
 
