@@ -9,20 +9,26 @@ future maintainer (or fresh-context Claude) can pick up where we left off.
 
 **Symptom:** A player's tab gets disconnected mid-game with no obvious cause.
 
-**What we already did:**
-- Bumped server idle window: `PING_AFTER_MS=15s`, `CLOSE_AFTER_MS=60s` (was
-  5s/20s) to tolerate background-tab throttling.
-- Added proactive client-side `c ping` every 15s so even a heavily throttled
-  background tab keeps the connection warm.
-- Added always-on logging of close reasons in `Connection.close` with the
-  player nick - every disconnect now prints `[connection] closing
-  {id}/{nick}: {reason}` to the server stdout.
+**Root cause (fixed):** The client only auto-reconnected on *abnormal* WS
+closes (`wasClean=false`). The server's `idle-timeout` close uses code 1000
+(clean), so the client surfaced "Connection error" even though the server
+had started the 250s `c old` grace window.
 
-**Next time it happens:** Look at the server log for the close reason.
+**What we did:**
+- Client now auto-reconnects on clean closes too (when `savedId` is set).
+- Client keepalive tightened to 5s + immediate ping on tab visibility.
+- Server in-game idle cap raised to 180s (lobby stays 60s).
+- Reconnect retry budget raised to 80 attempts (~240s) to fit the grace window.
+- Seq-mismatch on inbound DATA now drops the socket for reconnect instead of
+  a hard `close()` that suppressed retry.
+- Always-on logging of close reasons in `Connection.close` with the player
+  nick - every disconnect prints `[connection] closing {id}/{nick}: {reason}`
+  to the server stdout.
+
+**If it still happens:** Look at the server log for the close reason.
 Likely candidates:
-- `idle-timeout` → keepalive timer didn't fire (browser tab was REALLY
-  throttled, or the connection was stuck somehow). Consider lowering the
-  client keepalive interval to 5s.
+- `idle-timeout` → tab was frozen longer than the in-game cap (180s). Client
+  should still auto-reconnect within the grace window if it wakes in time.
 - `seq-mismatch` → client sent packets out of order. Should be impossible
   via the normal code path; investigate the sequence of events.
 - `decode-failure` → client sent a malformed packet. Look at the surrounding

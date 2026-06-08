@@ -206,9 +206,35 @@ async function run(): Promise<void> {
         c3.ws.close();
 
         // ---------------------------------------------------------------
-        console.log("\nPhase 5: previously-rcok'd id -> c rcf if blipped a second time without grace");
-        // Drop c2's already-closed socket; it was a clean close so no grace
-        // was started this time. A fresh `c old <playerId>` should now `rcf`.
+        // ---------------------------------------------------------------
+        console.log("\nPhase 5: server idle-timeout (clean close) still leaves grace active");
+        // Simulate what happens when the server closes a socket for
+        // idle-timeout: code 1000 + reason "idle-timeout". The client fix
+        // is to reconnect on clean closes; server-side we verify grace
+        // survives this path.
+        const c5 = await openClient();
+        const idleId = await loginAsGuest(c5, "idle-tester");
+        c5.ws.send("d 5 lobbyselect\tselect\tx");
+        await awaitMatch(c5.queue, (s) => s.startsWith("d 5 status\tlobby\tx"), "status lobby x");
+        await awaitMatch(c5.queue, (s) => s.startsWith("d 6 lobby\tusers"), "lobby users");
+        await awaitMatch(c5.queue, (s) => s.startsWith("d 7 lobby\townjoin"), "lobby ownjoin");
+        // Clean close with the same reason the server uses on idle-timeout.
+        c5.ws.close(1000, "idle-timeout");
+        await new Promise((r) => setTimeout(r, 100));
+        const c5b = await openClient();
+        await awaitMatch(c5b.queue, (s) => s === "h 1", "header (post-idle)");
+        await awaitMatch(c5b.queue, (s) => s.startsWith("c crt 250"), "crt (post-idle)");
+        await awaitMatch(c5b.queue, (s) => s === "c ctr", "ctr (post-idle)");
+        c5b.ws.send(`c old ${idleId}`);
+        assertEq(
+            await awaitMatch(c5b.queue, (s) => s.startsWith("c rc"), "rcok after idle-timeout"),
+            "c rcok",
+            "idle-timeout reconnect",
+        );
+        c5b.ws.close();
+
+        // ---------------------------------------------------------------
+        console.log("\nPhase 6: previously-rcok'd id -> c rcf if blipped a second time without grace");
         // (Wait long enough for the close event to be processed.)
         await new Promise((r) => setTimeout(r, 100));
         const c4 = await openClient();

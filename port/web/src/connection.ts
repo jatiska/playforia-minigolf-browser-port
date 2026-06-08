@@ -9,12 +9,16 @@ import {
 
 const DEV = Boolean(import.meta.env?.DEV);
 
-/** Auto-reconnect tunables. The server's grace window (`c crt 250`) is far
- *  longer than what we attempt here - the asymmetry is intentional: we'd
- *  rather declare the session dead and surface a clear error than thrash
- *  for four minutes against a dead network. */
+/** Auto-reconnect tunables. The server's grace window (`c crt 250`) is
+ *  250 seconds; our retry budget should cover most of that so a player who
+ *  backgrounds the tab (or hits an idle-timeout blip) can recover without
+ *  refreshing. */
 const RECONNECT_INTERVAL_MS = 3_000;
-const RECONNECT_MAX_ATTEMPTS = 10;
+const RECONNECT_MAX_ATTEMPTS = 80;
+/** Proactive client ping interval. Must stay well under the server's 60s
+ *  lobby idle cap (and the longer in-game cap) so a throttled background tab
+ *  still produces inbound traffic before the server closes the socket. */
+const KEEPALIVE_INTERVAL_MS = 5_000;
 
 export type ConnectionEventMap = {
   open: Event;
@@ -75,8 +79,22 @@ export class Connection extends EventTarget {
   constructor(url: string) {
     super();
     this.url = url;
+    // When the tab wakes from background throttling, fire an immediate ping
+    // so the server sees inbound activity before its idle cap fires.
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     this.connect();
   }
+
+  private onVisibilityChange = (): void => {
+    if (document.visibilityState !== "visible") return;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send("c ping");
+      } catch {
+        /* ignore */
+      }
+    }
+  };
 
   private connect(): void {
     const ws = new WebSocket(this.url);
@@ -100,16 +118,14 @@ export class Connection extends EventTarget {
       if (DEV) console.debug("[conn] close", ev.code, ev.reason, "wasClean=" + ev.wasClean);
 
       // Decide between (a) trying to reconnect or (b) surfacing the close.
-      // Auto-reconnect only when:
-      //  - the user didn't initiate the close,
-      //  - we have a savedId (i.e. login completed),
-      //  - close was abnormal (browser code 1006 / wasClean=false). A clean
-      //    close usually means the server intentionally closed (idle-timeout,
-      //    seq-mismatch, etc.) and retrying would just re-trigger the same.
+      // Auto-reconnect when login completed (`savedId`) and the user didn't
+      // call `close()`. We intentionally retry even on *clean* closes: the
+      // server uses code 1000 for idle-timeout and seq-mismatch, but still
+      // starts the 250s `c old` grace window - skipping reconnect on
+      // wasClean=true was the main cause of "random" mid-game disconnects.
       const shouldReconnect =
         !this.userClosed &&
         this.savedId !== null &&
-        !ev.wasClean &&
         this.reconnectAttempt < RECONNECT_MAX_ATTEMPTS;
 
       if (shouldReconnect) {
@@ -160,16 +176,20 @@ export class Connection extends EventTarget {
   }
 
   private startKeepalive(): void {
-    // Start proactive keepalive - every 15s, push a `c ping` so the server
-    // sees inbound activity and won't time us out (server cap is 60s).
-    // setInterval still fires in background tabs, just throttled to ~1Hz
-    // minimum, which is plenty for our 15s cadence.
+    // Proactive keepalive - push `c ping` so the server sees inbound
+    // activity. setInterval still fires in background tabs, just throttled
+    // to ~1Hz minimum; a 5s cadence survives that throttling within the
+    // server's 60s lobby / 180s in-game idle caps.
     if (this.keepaliveTimer !== null) window.clearInterval(this.keepaliveTimer);
     this.keepaliveTimer = window.setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        try { this.ws.send("c ping"); } catch { /* ignore */ }
+        try {
+          this.ws.send("c ping");
+        } catch {
+          /* ignore */
+        }
       }
-    }, 15_000);
+    }, KEEPALIVE_INTERVAL_MS);
   }
 
   private scheduleReconnect(): void {
@@ -244,7 +264,9 @@ export class Connection extends EventTarget {
         this.emitError(
           `seq mismatch: expected ${this.inSeq}, got ${pkt.seq}`,
         );
-        this.close();
+        // Drop the socket without marking userClosed so the close handler
+        // can walk the `c old` reconnect path instead of a hard logout.
+        this.dropSocket();
         return;
       }
       this.inSeq++;
@@ -313,12 +335,32 @@ export class Connection extends EventTarget {
     this.send(buildCommand(verb, ...args));
   }
 
+  /** Tear down the live socket without marking the session as user-closed.
+   *  Used for recoverable wire errors (seq mismatch) where the server's
+   *  grace window may still accept `c old <savedId>`. */
+  private dropSocket(): void {
+    if (this.keepaliveTimer !== null) {
+      window.clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+
   close(): void {
     if (this.userClosed) return;
     this.userClosed = true;
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.keepaliveTimer !== null) {
+      window.clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
     }
     try {
       this.ws?.close();

@@ -425,14 +425,16 @@ never leaks into the next.
 ## Heartbeat
 
 Server side:
-- If no inbound for 15s → send `c ping`.
-- If no inbound for 60s → close with reason "idle-timeout".
+- Sends `c ping` every 3s as an RTT probe (doubles as idle nudge).
+- If no inbound for 60s (lobby) or 180s (mid-game) → close with reason
+  "idle-timeout". The longer in-game cap tolerates background-tab JS
+  throttling without dropping active players.
 
 Client side:
 - Always reply pong to inbound `c ping` (auto-handled in `Connection`).
-- Proactive `c ping` every 15s regardless. This is what keeps a backgrounded
-  browser tab from being timed out (Chrome throttles JS in background tabs;
-  the auto-pong might miss the deadline; the proactive ping has more slack).
+- Proactive `c ping` every 5s regardless, plus an immediate ping when the
+  tab becomes visible again (`visibilitychange`). This keeps inbound traffic
+  flowing even when Chrome throttles background timers.
 
 ## Reconnect after network blip
 
@@ -445,12 +447,13 @@ Sequence:
 ```
 (network blip - client's WS dies, code 1006 / wasClean=false)
 
-(server) handleDisconnect: defers full cleanup by 250s if player.game === null;
-         player record stays in the lobby (peers' user lists unchanged).
-         Mid-game disconnects bypass grace and forfeit immediately -
-         peers are otherwise stuck waiting for endstroke.
+(server) handleDisconnect: defers full cleanup by 250s for everyone (lobby
+         and mid-game). Mid-game, the disconnected player's current hole is
+         auto-forfeited so peers aren't blocked; pacing checks treat the
+         in-grace slot as skippable on subsequent holes.
 
-(client) opens fresh WS - server sends usual banner:
+(client) opens fresh WS (auto-retry on both abnormal *and* clean closes,
+         including idle-timeout) - server sends usual banner:
          h 1
          c crt 250
          c ctr
@@ -467,9 +470,9 @@ peer chat). This matches what the original Java client effectively did
 (its retain-seq protocol tripped its own gap-detection on any peer
 broadcast during the gap).
 
-Client-side retry: 10 attempts, 3-second interval (~30s total budget).
-Capped well under the server's 250s window so we surface failure
-quickly when the network is genuinely down rather than thrashing.
+Client-side retry: 80 attempts, 3-second interval (~240s total budget).
+Sized to fit inside the server's 250s grace window so a backgrounded tab
+or brief network outage can recover without a full page refresh.
 On exhaustion or `c rcf` the client emits `reconnect-failed` and shows
 "Reconnect failed - please refresh." in the error banner.
 
