@@ -327,7 +327,10 @@ register({
             const maxStrokes = parseInt(rest[5] ?? "10", 10) || 10;
             const strokeTimeout = parseInt(rest[6] ?? "60", 10) || 60;
             const water = parseInt(rest[7] ?? "0", 10) || 0;
-            const collision = parseInt(rest[8] ?? "1", 10) || 1;
+            let collision = parseInt(rest[8] ?? "1", 10);
+            if (Number.isNaN(collision) || (collision !== 0 && collision !== 1)) {
+                collision = 1;
+            }
             const scoreSystem = parseInt(rest[9] ?? "0", 10) || 0;
             const weightEnd = parseInt(rest[10] ?? "0", 10) || 0;
             // Port extension: 12th cmpt arg is the turn-based flag. Older
