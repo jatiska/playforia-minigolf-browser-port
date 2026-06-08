@@ -15,7 +15,13 @@ import { logEvent } from "./log.ts";
 // even less). The original Java applet didn't have that problem, but our
 // WebSocket connection does - be generous with the idle window so a quick
 // alt-tab doesn't disconnect anyone mid-game.
+/** Idle cap for lobby / pre-game connections. */
 const CLOSE_AFTER_MS = 60_000;
+/** Generous cap while a player is mid-game. Backgrounded browser tabs can
+ *  freeze JS for well over a minute; closing too aggressively forces a
+ *  reconnect dance even when the client would recover on wake. Still well
+ *  under the 250s `c old` grace window. */
+const IN_GAME_CLOSE_AFTER_MS = 180_000;
 /**
  * How often the server sends a `c ping` regardless of inbound activity. The
  * RTT it measures (via the matching `c pong`) feeds adaptive `apply_tick`
@@ -224,7 +230,8 @@ export class Connection {
     private checkHeartbeat(): void {
         if (this.closed) return;
         const elapsed = Date.now() - this.lastActivity;
-        if (elapsed > CLOSE_AFTER_MS) {
+        const cap = this.player?.game != null ? IN_GAME_CLOSE_AFTER_MS : CLOSE_AFTER_MS;
+        if (elapsed > cap) {
             this.close("idle-timeout");
         }
         // Keepalive pings are subsumed by `probeRtt` (every 3s regardless of

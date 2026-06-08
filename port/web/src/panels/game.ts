@@ -1283,10 +1283,7 @@ export class GamePanel implements Panel {
             this.worldTick = Math.floor(elapsedRaw / PHYSICS_STEP_MS);
             // Pending impulses were keyed against the stale clock; their
             // applyTicks could now be in the past or far future. Drop them
-            // - the server knows we're reconnecting and will retransmit
-            // anything that mattered (today this is theoretical: mid-game
-            // grace isn't supported, so on reconnect we're always in the
-            // lobby with no pending strokes).
+            // - the server sends a full catchup via sendReconnectCatchup.
             this.pendingImpulses = [];
             this.pendingSnaps = [];
             this.lastStrokeWasLate = false;
