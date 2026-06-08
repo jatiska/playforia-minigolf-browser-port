@@ -1683,6 +1683,23 @@ export class GamePanel implements Panel {
         !peer.ball.inHole;
       peers.push(inTrack ? peer.ball : null);
     }
+    // Java GameCanvas.run() sets tempCoordX/Y for every player at physics-run
+    // entry, not only the shooter. Idle peers bumped by krokkaus during this
+    // stroke use that snapshot for water-event=0 respawn (back to where they
+    // were resting when the stroke began, not their last own shot origin).
+    for (let pi = 0; pi < this.players.length; pi++) {
+      if (pi === id) continue;
+      const peer = this.players[pi];
+      if (!peer) continue;
+      if (peer.simulating) continue;
+      if (peer.holedThisTrack || peer.forfeitedThisTrack || peer.partReason !== 0) continue;
+      if (peer.ball.inHole) continue;
+      if (peer.nick === "") continue;
+      peer.ball.strokeStartX = peer.ball.x;
+      peer.ball.strokeStartY = peer.ball.y;
+      peer.ball.shoreX = peer.ball.x;
+      peer.ball.shoreY = peer.ball.y;
+    }
     const ctx: PhysicsContext = {
       map: this.parsedMap,
       seed: new Seed(BigInt(seedNum)),
@@ -1965,12 +1982,10 @@ export class GamePanel implements Panel {
       // just gave us velocity this tick.
       const moving = slot.simulating || ball.vx !== 0 || ball.vy !== 0;
       if (!moving) continue;
-      // Re-arm a previously-stopped ball that just got bumped. We do NOT
-      // reset strokeStartX/Y - Java's `tempCoordX/Y` is only set by a real
-      // stroke, so a krokkaus victim that lands in water (event 0) goes
-      // back to where they LAST shot from, not where they were when bumped.
-      // shoreX/Y reset is fine since Java's `tempCoord2X/Y` is initialized
-      // to playerX/Y at run() entry.
+      // Re-arm a previously-stopped ball that just got bumped. strokeStartX/Y
+      // was snapshotted for idle peers in applyBeginStroke() when the stroke
+      // that caused this bump began (Java tempCoordX/Y at run() entry). Reset
+      // shoreX/Y here so water-event=1 tracks from the bump point onward.
       if (ball.stopped) {
         ball.stopped = false;
         ball.iterationsThisStroke = 0;
