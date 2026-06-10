@@ -159,7 +159,8 @@ async function run(): Promise<void> {
         }
         console.log("  ok: c rcok");
 
-        await a2.waitFor((s) => /^d \d+ game\tstart$/.test(s), "catchup game start");
+        // Catchup must NOT include `game start` — that packet wipes in-memory
+        // hole scores on a reconnecting client. Late joiners need it; reconnects don't.
         await a2.waitFor((s) => /^d \d+ game\tresetvoteskip$/.test(s), "catchup resetvoteskip");
         await a2.waitFor((s) => /^d \d+ game\tstarttrack\t/.test(s), "catchup starttrack", 8000);
         console.log("  ok: catchup burst received");
