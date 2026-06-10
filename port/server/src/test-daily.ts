@@ -264,6 +264,19 @@ async function main(): Promise<void> {
         await e.waitFor((s) => /^d \d+ game\tend$/.test(s), "E gets personal end (sparse-id finisher)");
         console.log("[OK] sparse-id daily finisher receives personal `game end`");
 
+        // Regression: sparse-id occupant forfeit must not silently no-op.
+        // Pre-fix: DailyGame.forfeit checked `this.players[id]` using the
+        // sparse slot id as an array index. When D (id=1) was alone in the
+        // room at players[0], `players[1]` was undefined and forfeit returned
+        // without broadcasting endstroke or sending `game end`.
+        d.sendData("game", "forfeit");
+        await d.waitFor(
+            (s) => new RegExp(`^d \\d+ game\\tendstroke\\t${did}\\t\\d+\\tp$`).test(s),
+            "D sparse-id forfeit endstroke",
+        );
+        await d.waitFor((s) => /^d \d+ game\tend$/.test(s), "D sparse-id forfeit personal end");
+        console.log("[OK] sparse-id daily forfeit lands");
+
         // Regression: mid-game disconnect must not orphan the daily singleton.
         // Pre-fix: when the last player in the daily room dropped their
         // socket, `fullyRemovePlayer` called `lobby.removeGame(daily_game)`,
@@ -287,9 +300,13 @@ async function main(): Promise<void> {
         await new Promise((r) => setTimeout(r, 250));
 
         const dailyLobby = server.golfServer.getLobby("d");
-        if (dailyLobby.inGamePlayerCount() !== 0) {
+        // Mid-game disconnect grace keeps player records alive for 250s, so
+        // in_game still reflects D/E until grace expires. The regression target
+        // here is that the singleton stays registered (gameCount), not that
+        // in_game drops to zero immediately.
+        if (dailyLobby.gameCount() !== 1) {
             throw new Error(
-                `daily lobby in_game count after dropouts = ${dailyLobby.inGamePlayerCount()}; want 0`,
+                `daily lobby game count after dropouts = ${dailyLobby.gameCount()}; want 1 (singleton must stay registered)`,
             );
         }
 
@@ -306,9 +323,13 @@ async function main(): Promise<void> {
                 `daily lobby game count after re-entry = ${dailyLobby.gameCount()}; want 1 (singleton must be re-registered)`,
             );
         }
-        if (dailyLobby.inGamePlayerCount() !== 1) {
+        // Grace-period dropouts still occupy slots until 250s expires; count only
+        // live sockets for the "fresh joiner can play" assertion.
+        const dailyGame = server.golfServer.getDailyGame();
+        const liveInGame = dailyGame.getPlayers().filter((p) => p.disconnectedAt === null).length;
+        if (liveInGame !== 1) {
             throw new Error(
-                `daily lobby in_game count after re-entry = ${dailyLobby.inGamePlayerCount()}; want 1`,
+                `live in-game players after F re-entry = ${liveInGame}; want 1 (F only)`,
             );
         }
         console.log("[OK] daily singleton stays counted after mid-game dropouts and re-entry");
@@ -323,11 +344,18 @@ async function main(): Promise<void> {
         // slot fall off the players array (their click handler bailed before
         // even sending beginstroke). Either way, "the map changes after day
         // rollover but the ball doesn't move at all" — the user-reported
-        // symptom. F just rejoined above (id=0) — close F and bring in G/H
-        // to set up a sparse remainder, then fake the rollover and verify a
-        // shot from the sparse occupant lands.
+        // symptom. Close F, evict grace-period ghosts from earlier disconnect
+        // cases, then bring in G/H to set up a sparse remainder, fake the
+        // rollover, and verify a shot from the sparse occupant lands.
         f.close();
         await new Promise((r) => setTimeout(r, 250));
+        {
+            const dgCleanup = server.golfServer.getDailyGame();
+            for (const p of [...dgCleanup.getPlayers()]) {
+                dgCleanup.removePlayer(p, 5);
+                server.golfServer.removePlayer(p.id);
+            }
+        }
 
         const g = new Client("G");
         const h = new Client("H");

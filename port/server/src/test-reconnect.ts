@@ -249,6 +249,28 @@ async function run(): Promise<void> {
         assertEq(await awaitMatch(c4.queue, (s) => s.startsWith("c rc"), "second rcok"), "c rcok", "reattach via second clean-close");
         c4.ws.close();
 
+        // ---------------------------------------------------------------
+        console.log("\nPhase 7: seq mismatch closes socket but grace survives");
+        const c7 = await openClient();
+        const seqId = await loginAsGuest(c7, "seq-tester");
+        // loginAsGuest consumed seq 0..4; server expects 5 next.
+        c7.ws.send("d 99 lobbyselect\trnop");
+        await new Promise<void>((resolve) => {
+            c7.ws.once("close", () => resolve());
+        });
+        await new Promise((r) => setTimeout(r, 100));
+        const c7b = await openClient();
+        await awaitMatch(c7b.queue, (s) => s === "h 1", "header (post-seq-mismatch)");
+        await awaitMatch(c7b.queue, (s) => s.startsWith("c crt 250"), "crt (post-seq-mismatch)");
+        await awaitMatch(c7b.queue, (s) => s === "c ctr", "ctr (post-seq-mismatch)");
+        c7b.ws.send(`c old ${seqId}`);
+        assertEq(
+            await awaitMatch(c7b.queue, (s) => s.startsWith("c rc"), "rcok after seq-mismatch"),
+            "c rcok",
+            "seq-mismatch reconnect",
+        );
+        c7b.ws.close();
+
         console.log("\nALL PHASES PASSED");
     } catch (err) {
         console.error("\nFAIL:", err instanceof Error ? err.message : err);

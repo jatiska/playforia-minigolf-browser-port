@@ -1048,7 +1048,7 @@ export class GolfGame extends Game {
      */
     protected forfeit(player: Player): void {
         const id = this.getPlayerId(player);
-        if (!this.players[id]) return;
+        if (this.players.indexOf(player) < 0) return;
         // Already done - ignore.
         const cur = this.playStatus.charAt(id);
         if (cur === "t" || cur === "p") return;
@@ -1382,6 +1382,8 @@ export class DailyGame extends GolfGame {
         // trackStartedAtMs - existing players are mid-track; the joiner
         // calibrates via the `E <elapsedMs>` field in formatStartTrack.
         const stats = this.dailyTrackManager.getStats(this.tracks[0]);
+        // Sparse ids: size buff by numberIndex (= max id + 1), not
+        // players.length — same shape as broadcastStartTrack / rotateIfNewDay.
         const buff = "f".repeat(Math.max(this.numberIndex, this.players.length));
         player.connection.sendDataRaw(tabularize("game", "start"));
         player.connection.sendDataRaw(tabularize("game", "resetvoteskip"));
@@ -1440,7 +1442,7 @@ export class DailyGame extends GolfGame {
 
     protected override forfeit(player: Player): void {
         const id = this.getPlayerId(player);
-        if (!this.players[id]) return;
+        if (this.players.indexOf(player) < 0) return;
         const cur = this.playStatus.charAt(id);
         if (cur === "t" || cur === "p") return;
         const cap = (this.playerStrokesThisTrack[id] ?? 0) + 1;
