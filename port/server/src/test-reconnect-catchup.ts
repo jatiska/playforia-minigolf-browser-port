@@ -83,7 +83,19 @@ async function main(): Promise<void> {
         throw new Error("catchup on track 2 must include `game gametrack 2`");
     }
 
-    console.log("[OK] reconnect catchup omits game start and includes gametrack");
+    console.log("[OK] reconnect catchup omits game start and includes gametrack on hole 2");
+
+    // Hole 1 reconnect must also emit gametrack 1: starttrack alone bumps
+    // the client's currentTrackIdx by one, so without gametrack scores land
+    // in the wrong column.
+    (game as unknown as { currentTrack: number }).currentTrack = 0;
+    sent.length = 0;
+    game.sendReconnectResync(creator);
+
+    if (!sent.some((b) => b === "game\tgametrack\t1")) {
+        throw new Error("catchup on track 1 must include `game gametrack 1`");
+    }
+    console.log("[OK] reconnect catchup includes gametrack on hole 1");
     process.exit(0);
 }
 
