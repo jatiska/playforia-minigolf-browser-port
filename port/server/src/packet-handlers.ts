@@ -66,6 +66,16 @@ register({
         }
         if (server.handleReconnect(conn, id)) {
             conn.sendCommand("rcok");
+            // Catchup DATA must follow rcok: the web client validates inbound
+            // seq against a stale counter until rcok resets inSeq to 0.
+            const player = conn.player;
+            if (player?.game) {
+                try {
+                    player.game.sendReconnectResync(player);
+                } catch (err) {
+                    console.error("[reconnect] resync failed:", err);
+                }
+            }
         } else {
             conn.sendCommand("rcf");
         }

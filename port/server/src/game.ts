@@ -629,11 +629,11 @@ export class GolfGame extends Game {
         player.connection.sendDataRaw(this.formatStartTrack(buff, stats));
         // `starttrack` increments the client's track counter by one; correct
         // with `gametrack` the way `sendCurrentTrackTo` does for late joiners.
-        if (this.currentTrack > 0) {
-            player.connection.sendDataRaw(
-                tabularize("game", "gametrack", this.currentTrack + 1),
-            );
-        }
+        // Include hole 1 too: without this, a reconnect on track 0 bumps
+        // currentTrackIdx to 2 and hole scores land in the wrong column.
+        player.connection.sendDataRaw(
+            tabularize("game", "gametrack", this.currentTrack + 1),
+        );
         // Replay completion state for every finished slot (including the
         // reconnecting player's own, since they may have been forfeited on
         // disconnect and their client doesn't know yet).
@@ -1124,13 +1124,14 @@ export class GolfGame extends Game {
         // (mirroring `forfeit`). Players already holed ('t') or forfeited ('p')
         // keep their actual score; only those still in 'f' get the max.
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
-        for (let i = 0; i < this.players.length; i++) {
-            if (psArr[i] !== "f") continue;
-            const cap = this.maxStrokes > 0 ? this.maxStrokes : this.playerStrokesThisTrack[i] + 1;
-            this.playerStrokesThisTrack[i] = cap;
-            psArr[i] = "p";
-            this.writeAll(tabularize("game", "endstroke", i, cap, "p"));
+        while (psArr.length < this.numPlayers) psArr.push("f");
+        for (const player of this.players) {
+            const id = this.getPlayerId(player);
+            if (psArr[id] !== "f") continue;
+            const cap = this.maxStrokes > 0 ? this.maxStrokes : this.playerStrokesThisTrack[id] + 1;
+            this.playerStrokesThisTrack[id] = cap;
+            psArr[id] = "p";
+            this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
         }
         this.playStatus = psArr.join("");
         this.nextTrack();
@@ -1220,7 +1221,11 @@ export class GolfGame extends Game {
         }
         if (this.currentTrack < this.tracks.length) {
             const stats = this.trackManager.getStats(this.tracks[this.currentTrack]);
-            const buff = "t".repeat(this.players.length);
+            // Size by room capacity (numPlayers), not players.length. After
+            // leavers, survivors can occupy non-contiguous slot ids (e.g. 0
+            // and 3 in a 4-player room); shrinking to players.length would
+            // truncate playStatus and silently reject beginstroke for high slots.
+            const buff = "t".repeat(this.numPlayers);
             for (const p of this.players) {
                 const id = this.getPlayerId(p);
                 this.playerStrokesThisTrack[id] = 0;
