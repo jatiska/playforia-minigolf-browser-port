@@ -627,13 +627,15 @@ export class GolfGame extends Game {
         // Personal late-resend: do NOT reset trackStartedAtMs - the player
         // picks up the existing shared clock via the `E <elapsedMs>` field.
         player.connection.sendDataRaw(this.formatStartTrack(buff, stats));
-        // `starttrack` increments the client's track counter by one; correct
-        // with `gametrack` the way `sendCurrentTrackTo` does for late joiners.
-        if (this.currentTrack > 0) {
-            player.connection.sendDataRaw(
-                tabularize("game", "gametrack", this.currentTrack + 1),
-            );
-        }
+        // `starttrack` increments the client's track counter by one. Reconnecting
+        // players already had a non-zero currentTrackIdx before the blip (unlike
+        // late joiners who arrive with 0 and get `game start` first), so always
+        // stamp `gametrack` — including on hole 1 — the same way
+        // `sendCurrentTrackTo` does. Without this, a hole-1 reconnect bumps
+        // currentTrackIdx to 2 and holeScores land in the wrong column.
+        player.connection.sendDataRaw(
+            tabularize("game", "gametrack", this.currentTrack + 1),
+        );
         // Replay completion state for every finished slot (including the
         // reconnecting player's own, since they may have been forfeited on
         // disconnect and their client doesn't know yet).
@@ -2063,7 +2065,7 @@ export class MultiGame extends GolfGame {
     /**
      * Reconnect resync for MultiGame: full track replay plus turn / practice
      * state. The base `GolfGame.sendReconnectResync` sends `resetvoteskip`/
-     * `starttrack` (+ `gametrack` when past hole 1) + per-slot endstroke
+     * `starttrack` + `gametrack` + per-slot endstroke
      * replays; on top we add the room-specific bits a fresh
      * `sendCurrentTrackTo` would have sent (turn pointer for turn-based,
      * practicemode flag if practicing).
