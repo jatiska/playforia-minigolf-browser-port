@@ -165,8 +165,8 @@ async function testReconnectCatchup(port: number): Promise<void> {
         );
 
         const b2 = await reconnectViaOld("B-recon", port, bPlayerId);
-        await b2.waitFor((s) => /^d \d+ game\tstart$/.test(s), "B catchup game start");
         await b2.waitFor((s) => /^d \d+ game\tresetvoteskip$/.test(s), "B catchup resetvoteskip");
+        await b2.waitFor((s) => /^d \d+ game\tgametrack\t2$/.test(s), "B catchup gametrack");
         const catchupTrack = await b2.waitFor(
             (s) => /^d \d+ game\tstarttrack\tff/.test(s),
             "B catchup starttrack on hole 2",

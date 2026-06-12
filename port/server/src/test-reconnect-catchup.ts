@@ -3,7 +3,8 @@
 // `game start` is correct for late joiners (fresh panel) but wipes a
 // reconnecting client's in-memory hole scores and resets currentTrackIdx to 0.
 // Catchup should mirror `sendCurrentTrackTo`: resetvoteskip + starttrack +
-// gametrack (when past hole 1) + endstroke replays.
+// gametrack (always — starttrack increments the client counter) + endstroke
+// replays.
 //
 // Invoke: node --experimental-strip-types --no-warnings src/test-reconnect-catchup.ts
 
@@ -60,30 +61,36 @@ async function main(): Promise<void> {
         false,
     );
 
-    // Mid-round state without a full networked match.
     game.isPublic = false;
     (game as unknown as { trackStartedAtMs: number }).trackStartedAtMs = performance.now();
-    (game as unknown as { currentTrack: number }).currentTrack = 1;
-    (game as unknown as { playStatus: string }).playStatus = "ff";
 
-    sent.length = 0;
-    game.sendReconnectResync(creator);
-
-    const hasStart = sent.some((b) => b === "game\tstart");
-    const hasStartTrack = sent.some((b) => b.startsWith("game\tstarttrack\t"));
-    const hasGametrack = sent.some((b) => b === "game\tgametrack\t2");
-
-    if (hasStart) {
-        throw new Error("catchup must not include `game start` (wipes client scoreboard)");
-    }
-    if (!hasStartTrack) {
-        throw new Error("catchup missing starttrack");
-    }
-    if (!hasGametrack) {
-        throw new Error("catchup on track 2 must include `game gametrack 2`");
+    function runCatchup(currentTrack: number, playStatus: string): string[] {
+        (game as unknown as { currentTrack: number }).currentTrack = currentTrack;
+        (game as unknown as { playStatus: string }).playStatus = playStatus;
+        sent.length = 0;
+        game.sendReconnectResync(creator);
+        return [...sent];
     }
 
-    console.log("[OK] reconnect catchup omits game start and includes gametrack");
+    const hole1 = runCatchup(0, "ff");
+    const hole2 = runCatchup(1, "ff");
+
+    for (const [label, packets, wantGametrack] of [
+        ["hole 1", hole1, "game\tgametrack\t1"],
+        ["hole 2", hole2, "game\tgametrack\t2"],
+    ] as const) {
+        if (packets.some((b) => b === "game\tstart")) {
+            throw new Error(`${label}: catchup must not include \`game start\` (wipes client scoreboard)`);
+        }
+        if (!packets.some((b) => b.startsWith("game\tstarttrack\t"))) {
+            throw new Error(`${label}: catchup missing starttrack`);
+        }
+        if (!packets.some((b) => b === wantGametrack)) {
+            throw new Error(`${label}: catchup must include \`${wantGametrack}\``);
+        }
+    }
+
+    console.log("[OK] reconnect catchup omits game start and includes gametrack on every hole");
     process.exit(0);
 }
 
