@@ -10,7 +10,7 @@
 //   - allDoneOnCurrentTrack / nextTrack treat grace-period 'f' slots as
 //     skippable and cap missed holes at maxStrokes so going offline can't
 //     score zero across the match.
-//   - handleReconnect replays start/resetvoteskip/starttrack + endstroke
+//   - handleReconnect replays resetvoteskip/starttrack (+ gametrack past hole 1)
 //     catchup so the client resyncs after a blip.
 //
 // Invoke: node --experimental-strip-types --no-warnings src/test-midgame-reconnect.ts
@@ -165,7 +165,8 @@ async function testReconnectCatchup(port: number): Promise<void> {
         );
 
         const b2 = await reconnectViaOld("B-recon", port, bPlayerId);
-        await b2.waitFor((s) => /^d \d+ game\tstart$/.test(s), "B catchup game start");
+        // Catchup must NOT include `game start` — that packet wipes in-memory
+        // hole scores on a reconnecting client. Late joiners need it; reconnects don't.
         await b2.waitFor((s) => /^d \d+ game\tresetvoteskip$/.test(s), "B catchup resetvoteskip");
         const catchupTrack = await b2.waitFor(
             (s) => /^d \d+ game\tstarttrack\tff/.test(s),
