@@ -405,6 +405,22 @@ export class GolfGame extends Game {
         return this.trackManager.getRandomTracks(this.numberOfTracks, cat);
     }
 
+    /**
+     * Width of the per-slot `playStatus` / stroke arrays. In MultiGame this is
+     * the room's `numPlayers` cap (slots 0..numPlayers-1), NOT
+     * `players.length` - a mid-game leaver vacates a slot but survivors keep
+     * their original ids, and shrinking `playStatus` to the survivor count
+     * silently blocks the highest-id survivor from shooting on the next hole.
+     */
+    protected playStatusCapacity(): number {
+        return this.numPlayers;
+    }
+
+    /** Fresh all-'f' (or 't' pre-replace) `playStatus` buff for a track broadcast. */
+    protected freshPlayStatusBuff(template: "f" | "t" = "f"): string {
+        return template.repeat(this.playStatusCapacity());
+    }
+
     sendGameInfo(player: Player): void {
         player.connection.sendData("status", "game");
         player.connection.sendData(
@@ -429,7 +445,7 @@ export class GolfGame extends Game {
     startGame(): void {
         this.writeAll(tabularize("game", "start"));
 
-        const buff = "t".repeat(this.players.length);
+        const buff = this.freshPlayStatusBuff("t");
         this.playStatus = buff.replace(/t/g, "f");
 
         const stats: TrackStats = this.trackManager.getStats(this.tracks[0]);
@@ -617,7 +633,7 @@ export class GolfGame extends Game {
         const stats = this.trackManager.getStats(track);
         // Width of buff matches existing playStatus length so the client's
         // numPlayers derivation stays consistent with peers' view.
-        const buff = "f".repeat(Math.max(this.playStatus.length, this.players.length));
+        const buff = "f".repeat(Math.max(this.playStatus.length, this.playStatusCapacity()));
         // Do NOT send `game start` here. Late joiners get that packet because
         // they're mounting the game panel fresh; a reconnecting player still
         // has in-memory hole scores and a track index from before the blip.
@@ -668,7 +684,7 @@ export class GolfGame extends Game {
         const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
         this.playerStrokesThisTrack[id] = cap;
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("f");
         psArr[id] = "p";
         this.playStatus = psArr.join("");
         this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
@@ -775,7 +791,7 @@ export class GolfGame extends Game {
 
         // Update authoritative playStatus with this player's char (only).
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("f");
 
         let resolvedStatus: "t" | "p" | "f" =
             myStatus === "t" || myStatus === "p" ? myStatus : "f";
@@ -1057,7 +1073,7 @@ export class GolfGame extends Game {
         this.playerStrokesThisTrack[id] = cap;
 
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("f");
         psArr[id] = "p";
         this.playStatus = psArr.join("");
 
@@ -1124,8 +1140,8 @@ export class GolfGame extends Game {
         // (mirroring `forfeit`). Players already holed ('t') or forfeited ('p')
         // keep their actual score; only those still in 'f' get the max.
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
-        for (let i = 0; i < this.players.length; i++) {
+        while (psArr.length < this.playStatusCapacity()) psArr.push("f");
+        for (let i = 0; i < this.playStatusCapacity(); i++) {
             if (psArr[i] !== "f") continue;
             const cap = this.maxStrokes > 0 ? this.maxStrokes : this.playerStrokesThisTrack[i] + 1;
             this.playerStrokesThisTrack[i] = cap;
@@ -1148,8 +1164,8 @@ export class GolfGame extends Game {
 
     protected reset(): void {
         this.currentTrack = 0;
-        this.playerStrokesThisTrack = new Array<number>(this.players.length).fill(0);
-        this.playerStrokesTotal = new Array<number>(this.players.length).fill(0);
+        this.playerStrokesThisTrack = new Array<number>(this.numPlayers).fill(0);
+        this.playerStrokesTotal = new Array<number>(this.numPlayers).fill(0);
         this.strokeCounter = 0;
         this.tracks = this.initTracks();
     }
@@ -1207,7 +1223,7 @@ export class GolfGame extends Game {
             const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
             this.playerStrokesThisTrack[id] = cap;
             const psArr = this.playStatus.split("");
-            while (psArr.length < this.players.length) psArr.push("f");
+            while (psArr.length < this.playStatusCapacity()) psArr.push("f");
             psArr[id] = "p";
             this.playStatus = psArr.join("");
             this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
@@ -1220,7 +1236,7 @@ export class GolfGame extends Game {
         }
         if (this.currentTrack < this.tracks.length) {
             const stats = this.trackManager.getStats(this.tracks[this.currentTrack]);
-            const buff = "t".repeat(this.players.length);
+            const buff = this.freshPlayStatusBuff("t");
             for (const p of this.players) {
                 const id = this.getPlayerId(p);
                 this.playerStrokesThisTrack[id] = 0;
@@ -1267,6 +1283,10 @@ const DAILY_MAX_SPARSE_IDS = 256;
 export class DailyGame extends GolfGame {
     public dateKey: string;
     private dailyTrackManager: TrackManager;
+
+    protected override playStatusCapacity(): number {
+        return Math.max(this.numberIndex, this.players.length);
+    }
 
     constructor(gameId: number, trackManager: TrackManager, dateKey: string) {
         super(
@@ -1384,7 +1404,7 @@ export class DailyGame extends GolfGame {
         const stats = this.dailyTrackManager.getStats(this.tracks[0]);
         // Sparse ids: size buff by numberIndex (= max id + 1), not
         // players.length — same shape as broadcastStartTrack / rotateIfNewDay.
-        const buff = "f".repeat(Math.max(this.numberIndex, this.players.length));
+        const buff = "f".repeat(this.playStatusCapacity());
         player.connection.sendDataRaw(tabularize("game", "start"));
         player.connection.sendDataRaw(tabularize("game", "resetvoteskip"));
         player.connection.sendDataRaw(this.formatStartTrack(buff, stats));
@@ -1401,7 +1421,7 @@ export class DailyGame extends GolfGame {
         // would get a too-short playStatus, set `numPlayers < myPlayerId+1`
         // on their client, and their own slot would fall off the players
         // array — their click handler then bails and the ball never moves.
-        const buff = "f".repeat(Math.max(this.numberIndex, this.players.length));
+        const buff = "f".repeat(this.playStatusCapacity());
         this.writeAll(tabularize("game", "resetvoteskip"));
         this.markTrackStart();
         this.writeAll(this.formatStartTrack(buff, stats));
@@ -1418,7 +1438,7 @@ export class DailyGame extends GolfGame {
         const myStatus = newPlayStatus.charAt(id);
         this.playerStrokesThisTrack[id] = (this.playerStrokesThisTrack[id] ?? 0) + 1;
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("f");
         const resolvedStatus: "t" | "p" | "f" =
             myStatus === "t" || myStatus === "p" ? myStatus : "f";
         psArr[id] = resolvedStatus;
@@ -1448,7 +1468,7 @@ export class DailyGame extends GolfGame {
         const cap = (this.playerStrokesThisTrack[id] ?? 0) + 1;
         this.playerStrokesThisTrack[id] = cap;
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("f");
         psArr[id] = "p";
         this.playStatus = psArr.join("");
         this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
@@ -1896,7 +1916,7 @@ export class MultiGame extends GolfGame {
         }
         for (const p of this.players) p.hasSkipped = false;
 
-        const buff = "f".repeat(this.players.length);
+        const buff = "f".repeat(this.playStatusCapacity());
         this.playStatus = buff;
         const stats = this.trackManager.getStats(this.practiceTrack);
         this.writeAll(tabularize("game", "start"));
