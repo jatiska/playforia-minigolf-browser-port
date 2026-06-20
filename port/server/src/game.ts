@@ -629,11 +629,12 @@ export class GolfGame extends Game {
         player.connection.sendDataRaw(this.formatStartTrack(buff, stats));
         // `starttrack` increments the client's track counter by one; correct
         // with `gametrack` the way `sendCurrentTrackTo` does for late joiners.
-        if (this.currentTrack > 0) {
-            player.connection.sendDataRaw(
-                tabularize("game", "gametrack", this.currentTrack + 1),
-            );
-        }
+        // Always emit gametrack (including track 1): without it a reconnect on
+        // the first hole bumps currentTrackIdx 1→2 and hole scores land in the
+        // wrong column until corrected.
+        player.connection.sendDataRaw(
+            tabularize("game", "gametrack", this.currentTrack + 1),
+        );
         // Replay completion state for every finished slot (including the
         // reconnecting player's own, since they may have been forfeited on
         // disconnect and their client doesn't know yet).
@@ -1220,13 +1221,26 @@ export class GolfGame extends Game {
         }
         if (this.currentTrack < this.tracks.length) {
             const stats = this.trackManager.getStats(this.tracks[this.currentTrack]);
-            const buff = "t".repeat(this.players.length);
+            // Sparse slot ids survive voluntary leaves (numberIndex only grows).
+            // Sizing playStatus by players.length truncates high ids off the end
+            // so beginstroke silently rejects the remaining top-slot player.
+            const statusLen = Math.max(this.playStatus.length, this.numberIndex);
+            const psArr = new Array<string>(statusLen).fill("f");
+            const presentIds = new Set(this.players.map((p) => this.getPlayerId(p)));
+            for (let i = 0; i < statusLen; i++) {
+                if (!presentIds.has(i) && i < this.playStatus.length) {
+                    const prev = this.playStatus.charAt(i);
+                    if (prev === "p" || prev === "t") psArr[i] = "p";
+                }
+            }
             for (const p of this.players) {
                 const id = this.getPlayerId(p);
                 this.playerStrokesThisTrack[id] = 0;
                 p.hasSkipped = false;
+                psArr[id] = "f";
             }
-            this.playStatus = buff.replace(/t/g, "f");
+            const buff = psArr.join("");
+            this.playStatus = buff;
             this.strokeSeedCounter = 0;
             this.writeAll(tabularize("game", "resetvoteskip"));
             this.markTrackStart();
@@ -2063,8 +2077,7 @@ export class MultiGame extends GolfGame {
     /**
      * Reconnect resync for MultiGame: full track replay plus turn / practice
      * state. The base `GolfGame.sendReconnectResync` sends `resetvoteskip`/
-     * `starttrack` (+ `gametrack` when past hole 1) + per-slot endstroke
-     * replays; on top we add the room-specific bits a fresh
+     * `starttrack` + `gametrack` + per-slot endstroke replays; on top we add the room-specific bits a fresh
      * `sendCurrentTrackTo` would have sent (turn pointer for turn-based,
      * practicemode flag if practicing).
      */
