@@ -165,12 +165,14 @@ async function testReconnectCatchup(port: number): Promise<void> {
         );
 
         const b2 = await reconnectViaOld("B-recon", port, bPlayerId);
-        await b2.waitFor((s) => /^d \d+ game\tstart$/.test(s), "B catchup game start");
+        // Catchup must NOT include `game start` — that packet wipes in-memory
+        // hole scores on a reconnecting client (see test-reconnect-catchup.ts).
         await b2.waitFor((s) => /^d \d+ game\tresetvoteskip$/.test(s), "B catchup resetvoteskip");
         const catchupTrack = await b2.waitFor(
             (s) => /^d \d+ game\tstarttrack\tff/.test(s),
             "B catchup starttrack on hole 2",
         );
+        await b2.waitFor((s) => /^d \d+ game\tgametrack\t2$/.test(s), "B catchup gametrack 2");
         if (!catchupTrack.includes("\tE ")) {
             throw new Error(`reconnect starttrack missing elapsed field E: ${catchupTrack}`);
         }
