@@ -60,7 +60,7 @@ async function main(): Promise<void> {
         false,
     );
 
-    // Mid-round state without a full networked match.
+    // Mid-round on track 2 (currentTrack=1).
     game.isPublic = false;
     (game as unknown as { trackStartedAtMs: number }).trackStartedAtMs = performance.now();
     (game as unknown as { currentTrack: number }).currentTrack = 1;
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
 
     const hasStart = sent.some((b) => b === "game\tstart");
     const hasStartTrack = sent.some((b) => b.startsWith("game\tstarttrack\t"));
-    const hasGametrack = sent.some((b) => b === "game\tgametrack\t2");
+    const hasGametrack2 = sent.some((b) => b === "game\tgametrack\t2");
 
     if (hasStart) {
         throw new Error("catchup must not include `game start` (wipes client scoreboard)");
@@ -79,11 +79,21 @@ async function main(): Promise<void> {
     if (!hasStartTrack) {
         throw new Error("catchup missing starttrack");
     }
-    if (!hasGametrack) {
+    if (!hasGametrack2) {
         throw new Error("catchup on track 2 must include `game gametrack 2`");
     }
 
-    console.log("[OK] reconnect catchup omits game start and includes gametrack");
+    // Track 1 reconnect: gametrack must still be sent so starttrack's +1 bump
+    // is corrected (otherwise currentTrackIdx becomes 2 on a 1-hole-in game).
+    (game as unknown as { currentTrack: number }).currentTrack = 0;
+    sent.length = 0;
+    game.sendReconnectResync(creator);
+    const hasGametrack1 = sent.some((b) => b === "game\tgametrack\t1");
+    if (!hasGametrack1) {
+        throw new Error("catchup on track 1 must include `game gametrack 1`");
+    }
+
+    console.log("[OK] reconnect catchup omits game start and always includes gametrack");
     process.exit(0);
 }
 
