@@ -239,18 +239,8 @@ export class GolfServer {
             cid: conn.clientId,
             conn: conn.connId,
         });
-        // Per-game post-reconnect resync. Currently only GolfGame uses it
-        // (tracktick → recalibrate worldTick). No-op when player is in a
-        // lobby (player.game === null), which is the only path supported
-        // today; the call is here so adding mid-game grace later just needs
-        // the relevant subclass override - not new wiring.
-        if (player.game) {
-            try {
-                player.game.sendReconnectResync(player);
-            } catch (err) {
-                console.error("[reconnect] resync failed:", err);
-            }
-        }
+        // Resync is sent by the packet handler AFTER `c rcok` so the web
+        // client's seq counters reset before catchup DATA arrives.
         return true;
     }
 

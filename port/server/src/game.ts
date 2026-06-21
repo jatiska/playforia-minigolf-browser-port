@@ -429,8 +429,8 @@ export class GolfGame extends Game {
     startGame(): void {
         this.writeAll(tabularize("game", "start"));
 
-        const buff = "t".repeat(this.players.length);
-        this.playStatus = buff.replace(/t/g, "f");
+        this.playStatus = this.freshPlayStatusForTrack();
+        const buff = this.playStatus;
 
         const stats: TrackStats = this.trackManager.getStats(this.tracks[0]);
 
@@ -534,6 +534,35 @@ export class GolfGame extends Game {
      * Recomputed per-stroke so a player's improving (or degrading) ping
      * during a session is reflected in the very next stroke they take.
      */
+    /**
+     * Width of the authoritative `playStatus` string and the `starttrack`
+     * buff. Defaults to the widest of the current string, live player count,
+     * and highest assigned slot id. Subclasses override when they use a
+     * fixed cap (MultiGame → `numPlayers`) or sparse ids (DailyGame).
+     */
+    protected playStatusCapacity(): number {
+        let cap = Math.max(this.playStatus.length, this.players.length);
+        for (const id of this.playersNumber) {
+            if (id + 1 > cap) cap = id + 1;
+        }
+        return cap;
+    }
+
+    /**
+     * Build a fresh per-hole `playStatus`: present players get 'f', every
+     * other slot in the capacity range stays 'p' so vacant seats (e.g. a
+     * leaver's reclaimed id in MultiGame) never trap `allDoneOnCurrentTrack`.
+     */
+    protected freshPlayStatusForTrack(): string {
+        const cap = this.playStatusCapacity();
+        const psArr = new Array<string>(cap).fill("p");
+        for (const p of this.players) {
+            const id = this.getPlayerId(p);
+            if (id >= 0 && id < cap) psArr[id] = "f";
+        }
+        return psArr.join("");
+    }
+
     protected getStrokeLookaheadTicks(): number {
         if (this.collision !== COLLISION_YES) return 0;
         // Use peakPingMs (max over recent samples) rather than avgPingMs
@@ -627,13 +656,15 @@ export class GolfGame extends Game {
         // Personal late-resend: do NOT reset trackStartedAtMs - the player
         // picks up the existing shared clock via the `E <elapsedMs>` field.
         player.connection.sendDataRaw(this.formatStartTrack(buff, stats));
-        // `starttrack` increments the client's track counter by one; correct
-        // with `gametrack` the way `sendCurrentTrackTo` does for late joiners.
-        if (this.currentTrack > 0) {
-            player.connection.sendDataRaw(
-                tabularize("game", "gametrack", this.currentTrack + 1),
-            );
-        }
+        // `starttrack` increments the client's track counter by one. Reconnecting
+        // players already had a non-zero currentTrackIdx before the blip (unlike
+        // late joiners who arrive with 0 and get `game start` first), so always
+        // stamp `gametrack` — including on hole 1 — the same way
+        // `sendCurrentTrackTo` does. Without this, a hole-1 reconnect bumps
+        // currentTrackIdx to 2 and holeScores land in the wrong column.
+        player.connection.sendDataRaw(
+            tabularize("game", "gametrack", this.currentTrack + 1),
+        );
         // Replay completion state for every finished slot (including the
         // reconnecting player's own, since they may have been forfeited on
         // disconnect and their client doesn't know yet).
@@ -668,7 +699,7 @@ export class GolfGame extends Game {
         const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
         this.playerStrokesThisTrack[id] = cap;
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("p");
         psArr[id] = "p";
         this.playStatus = psArr.join("");
         this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
@@ -775,7 +806,7 @@ export class GolfGame extends Game {
 
         // Update authoritative playStatus with this player's char (only).
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("p");
 
         let resolvedStatus: "t" | "p" | "f" =
             myStatus === "t" || myStatus === "p" ? myStatus : "f";
@@ -1057,7 +1088,7 @@ export class GolfGame extends Game {
         this.playerStrokesThisTrack[id] = cap;
 
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("p");
         psArr[id] = "p";
         this.playStatus = psArr.join("");
 
@@ -1124,13 +1155,14 @@ export class GolfGame extends Game {
         // (mirroring `forfeit`). Players already holed ('t') or forfeited ('p')
         // keep their actual score; only those still in 'f' get the max.
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
-        for (let i = 0; i < this.players.length; i++) {
-            if (psArr[i] !== "f") continue;
-            const cap = this.maxStrokes > 0 ? this.maxStrokes : this.playerStrokesThisTrack[i] + 1;
-            this.playerStrokesThisTrack[i] = cap;
-            psArr[i] = "p";
-            this.writeAll(tabularize("game", "endstroke", i, cap, "p"));
+        while (psArr.length < this.playStatusCapacity()) psArr.push("p");
+        for (const p of this.players) {
+            const id = this.getPlayerId(p);
+            if (psArr[id] !== "f") continue;
+            const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
+            this.playerStrokesThisTrack[id] = cap;
+            psArr[id] = "p";
+            this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
         }
         this.playStatus = psArr.join("");
         this.nextTrack();
@@ -1148,8 +1180,9 @@ export class GolfGame extends Game {
 
     protected reset(): void {
         this.currentTrack = 0;
-        this.playerStrokesThisTrack = new Array<number>(this.players.length).fill(0);
-        this.playerStrokesTotal = new Array<number>(this.players.length).fill(0);
+        const cap = this.playStatusCapacity();
+        this.playerStrokesThisTrack = new Array<number>(cap).fill(0);
+        this.playerStrokesTotal = new Array<number>(cap).fill(0);
         this.strokeCounter = 0;
         this.tracks = this.initTracks();
     }
@@ -1207,7 +1240,7 @@ export class GolfGame extends Game {
             const cap = this.maxStrokes > 0 ? this.maxStrokes : (this.playerStrokesThisTrack[id] ?? 0) + 1;
             this.playerStrokesThisTrack[id] = cap;
             const psArr = this.playStatus.split("");
-            while (psArr.length < this.players.length) psArr.push("f");
+            while (psArr.length < this.playStatusCapacity()) psArr.push("p");
             psArr[id] = "p";
             this.playStatus = psArr.join("");
             this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
@@ -1220,13 +1253,13 @@ export class GolfGame extends Game {
         }
         if (this.currentTrack < this.tracks.length) {
             const stats = this.trackManager.getStats(this.tracks[this.currentTrack]);
-            const buff = "t".repeat(this.players.length);
             for (const p of this.players) {
                 const id = this.getPlayerId(p);
                 this.playerStrokesThisTrack[id] = 0;
                 p.hasSkipped = false;
             }
-            this.playStatus = buff.replace(/t/g, "f");
+            this.playStatus = this.freshPlayStatusForTrack();
+            const buff = this.playStatus;
             this.strokeSeedCounter = 0;
             this.writeAll(tabularize("game", "resetvoteskip"));
             this.markTrackStart();
@@ -1267,6 +1300,10 @@ const DAILY_MAX_SPARSE_IDS = 256;
 export class DailyGame extends GolfGame {
     public dateKey: string;
     private dailyTrackManager: TrackManager;
+
+    protected override playStatusCapacity(): number {
+        return Math.max(this.numberIndex, this.players.length, this.playStatus.length);
+    }
 
     constructor(gameId: number, trackManager: TrackManager, dateKey: string) {
         super(
@@ -1418,7 +1455,7 @@ export class DailyGame extends GolfGame {
         const myStatus = newPlayStatus.charAt(id);
         this.playerStrokesThisTrack[id] = (this.playerStrokesThisTrack[id] ?? 0) + 1;
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("p");
         const resolvedStatus: "t" | "p" | "f" =
             myStatus === "t" || myStatus === "p" ? myStatus : "f";
         psArr[id] = resolvedStatus;
@@ -1448,7 +1485,7 @@ export class DailyGame extends GolfGame {
         const cap = (this.playerStrokesThisTrack[id] ?? 0) + 1;
         this.playerStrokesThisTrack[id] = cap;
         const psArr = this.playStatus.split("");
-        while (psArr.length < this.players.length) psArr.push("f");
+        while (psArr.length < this.playStatusCapacity()) psArr.push("p");
         psArr[id] = "p";
         this.playStatus = psArr.join("");
         this.writeAll(tabularize("game", "endstroke", id, cap, "p"));
@@ -1615,6 +1652,13 @@ export class MultiGame extends GolfGame {
      * `turnBased=false` rooms.
      */
     private currentTurn: number = -1;
+
+    /** MultiGame slots are dense within 0..numPlayers-1; keep playStatus wide
+     *  enough for the highest id even after a leaver vacates a lower slot. */
+    protected override playStatusCapacity(): number {
+        return this.numPlayers;
+    }
+
     constructor(
         creator: Player,
         gameId: number,
@@ -2063,8 +2107,7 @@ export class MultiGame extends GolfGame {
     /**
      * Reconnect resync for MultiGame: full track replay plus turn / practice
      * state. The base `GolfGame.sendReconnectResync` sends `resetvoteskip`/
-     * `starttrack` (+ `gametrack` when past hole 1) + per-slot endstroke
-     * replays; on top we add the room-specific bits a fresh
+     * `starttrack` + `gametrack` + per-slot endstroke replays; on top we add the room-specific bits a fresh
      * `sendCurrentTrackTo` would have sent (turn pointer for turn-based,
      * practicemode flag if practicing).
      */

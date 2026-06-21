@@ -851,6 +851,34 @@ function resetToStart(ball: BallState, ctx: PhysicsContext): void {
   ball.shoreY = ctx.startY;
 }
 
+/** Ball diameter for krokkaus overlap checks (radius 6.5 px each). */
+const PLAYER_COLLISION_DIAMETER = 13.0;
+
+/**
+ * True when `ball` is at rest and its circle overlaps another stationary
+ * peer's circle. Shared-spawn piles (everyone on the same tee tile) stay
+ * non-solid until each ball has moved off the cluster on its own.
+ */
+function isInStationaryOverlapGroup(
+  ball: BallState,
+  slot: number,
+  peers: Array<BallState | null>,
+): boolean {
+  if (ball.vx !== 0 || ball.vy !== 0) return false;
+  const r2 = PLAYER_COLLISION_DIAMETER * PLAYER_COLLISION_DIAMETER;
+  for (let i = 0; i < peers.length; i++) {
+    if (i === slot) continue;
+    const peer = peers[i];
+    if (!peer) continue;
+    if (peer.inHole || peer.onHole || peer.onLiquidOrSwamp) continue;
+    if (peer.vx !== 0 || peer.vy !== 0) continue;
+    const dx = peer.x - ball.x;
+    const dy = peer.y - ball.y;
+    if (dx * dx + dy * dy < r2) return true;
+  }
+  return false;
+}
+
 /**
  * Krokkaus collision response between two balls - port of
  * GameCanvas.handlePlayerCollisions (lines 1118-1141).
@@ -875,7 +903,7 @@ function handlePlayerCollisions(a: BallState, b: BallState): boolean {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const distance = Math.sqrt(dx * dx + dy * dy);
-  if (distance === 0 || distance > 13.0) return false;
+  if (distance === 0 || distance > PLAYER_COLLISION_DIAMETER) return false;
   const fx = dx / distance;
   const fy = dy / distance;
   const aSpeed = a.vx * fx + a.vy * fy;
@@ -931,6 +959,10 @@ export function step(ball: BallState, ctx: PhysicsContext): StepResult {
           const other = peers[pi];
           if (!other) continue;
           if (other.inHole || other.onHole || other.onLiquidOrSwamp) continue;
+          // Stacked / overlapping spawns: stationary peers that still share
+          // overlap with another resting ball are ghosts until they separate.
+          if (isInStationaryOverlapGroup(other, pi, peers)) continue;
+          if (isInStationaryOverlapGroup(ball, ctx.myIdx, peers)) continue;
           if (handlePlayerCollisions(ball, other)) {
             ball.vx *= 0.75;
             ball.vy *= 0.75;
