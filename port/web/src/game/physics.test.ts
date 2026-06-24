@@ -85,3 +85,92 @@ test("waterEvent=1 respawns at last shore, not strokeStart", () => {
     assert.equal(ball.x, 280);
     assert.equal(ball.y, 200);
 });
+
+function emptyMap(): ParsedMap {
+    return {
+        tiles: [],
+        collision: new Uint8Array(MAP_PIXEL_WIDTH * 375),
+        startPositions: [[50, 50]],
+        resetPositions: [null, null, null, null],
+        teleportStarts: [[], [], [], []],
+        teleportExits: [[], [], [], []],
+        magnetMap: null,
+        dirtyTiles: [],
+        atlases: {} as Atlases,
+    };
+}
+
+function mapWithWallPixels(walls: Array<[number, number]>): ParsedMap {
+    const map = emptyMap();
+    for (const [x, y] of walls) {
+        map.collision[y * MAP_PIXEL_WIDTH + x] = 16;
+    }
+    return map;
+}
+
+function krokkausCtx(
+    map: ParsedMap,
+    peers: Array<ReturnType<typeof newBall> | null>,
+    myIdx: number,
+): PhysicsContext {
+    return {
+        map,
+        seed: new Seed(1n),
+        norandom: true,
+        waterEvent: 0,
+        startX: 50,
+        startY: 50,
+        otherPlayers: [],
+        collisionMode: 1,
+        peers,
+        myIdx,
+    };
+}
+
+test("krokkaus skips collision for stationary spawn stacks", () => {
+    const map = emptyMap();
+    const moving = newBall(100, 100);
+    moving.vx = 5;
+    moving.vy = 0;
+    const stacked = newBall(100, 100);
+    const ctx = krokkausCtx(map, [moving, stacked], 0);
+
+    step(moving, ctx);
+
+    assert.equal(stacked.vx, 0, "stacked peer should stay at rest");
+    assert.equal(stacked.vy, 0, "stacked peer should stay at rest");
+    // No 0.75 krokkaus damping — only open-ground friction shaves a hair off vx.
+    assert.ok(moving.vx > 4.9, "moving ball should not be damped by ghost stack");
+});
+
+test("krokkaus applies collision between separated resting peers", () => {
+    const map = emptyMap();
+    const moving = newBall(100, 100);
+    moving.vx = 5;
+    moving.vy = 0;
+    const target = newBall(106, 100);
+    const ctx = krokkausCtx(map, [moving, target], 0);
+
+    step(moving, ctx);
+
+    assert.notEqual(moving.vx, 5, "moving ball should exchange momentum with separated peer");
+});
+
+test("inside-corner suppression does not clear top wall for vx=0 upward approach", () => {
+    // Regression: geometry-only inside-corner rules let a ball at vx=0 phase
+    // through a horizontal wall when a vertical wall extended to its left.
+    const x = 200;
+    const y = 200;
+    const map = mapWithWallPixels([
+        [x, y - 6], // top neighbour sample
+        [x - 6, y], // left neighbour sample
+        [x - 4, y - 4], // tl diagonal sample (DIAG_OFFSET = 4)
+    ]);
+    const ball = newBall(x, y);
+    ball.vx = 0;
+    ball.vy = -4;
+
+    step(ball, krokkausCtx(map, [ball], 0));
+
+    assert.ok(ball.vy > 0, "ball should bounce off top wall (vy flips positive)");
+});
