@@ -866,7 +866,10 @@ export class GolfGame extends Game {
         const claimedObserverId = parseInt(fields[2] ?? "", 10);
         if (claimedObserverId !== observerId) return; // clients may only speak for themselves
         const subjectId = parseInt(fields[3] ?? "", 10);
-        if (!Number.isFinite(subjectId) || subjectId < 0 || subjectId >= this.players.length) return;
+        // Slot ids are sparse after mid-game leavers (e.g. survivors at 0 and 3
+        // in a 4-seat room) while `players.length` is only 2. Clients index
+        // ballend by slot id up to playStatus width, not live headcount.
+        if (!Number.isFinite(subjectId) || subjectId < 0 || subjectId >= this.playStatusCapacity()) return;
         const x = parseFloat(fields[4] ?? "");
         const y = parseFloat(fields[5] ?? "");
         const worldTick = parseInt(fields[6] ?? "", 10);
