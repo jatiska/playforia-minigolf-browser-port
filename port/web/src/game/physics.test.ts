@@ -1,8 +1,6 @@
-// Regression: water-event=0 respawns at strokeStart, not shore.
-//
-// Krokkaus can push an idle peer into water. game.ts snapshots each idle
-// peer's resting position into strokeStartX/Y at stroke begin so water-event=0
-// returns them to where they were before the hit, not their last own shot.
+// Physics regressions:
+//   - water-event=0 respawns at strokeStart (krokkaus victim anchor)
+//   - inside-corner suppression requires velocity into the corner (wall-clip fix)
 //
 // Usage: node --test --experimental-strip-types src/game/physics.test.ts
 
@@ -13,9 +11,9 @@ import { newBall, step, type PhysicsContext } from "./physics.ts";
 import type { ParsedMap } from "./map.ts";
 import type { Atlases } from "./sprites.ts";
 
-function mapWithWaterAt(px: number, py: number): ParsedMap {
-    const collision = new Uint8Array(MAP_PIXEL_WIDTH * 375);
-    collision[py * MAP_PIXEL_WIDTH + px] = 12;
+const WALL = 16;
+
+function emptyMap(collision: Uint8Array): ParsedMap {
     return {
         tiles: [],
         collision,
@@ -27,6 +25,24 @@ function mapWithWaterAt(px: number, py: number): ParsedMap {
         dirtyTiles: [],
         atlases: {} as Atlases,
     };
+}
+
+function setWall(collision: Uint8Array, x: number, y: number): void {
+    collision[y * MAP_PIXEL_WIDTH + x] = WALL;
+}
+
+function mapWithWaterAt(px: number, py: number): ParsedMap {
+    const collision = new Uint8Array(MAP_PIXEL_WIDTH * 375);
+    collision[py * MAP_PIXEL_WIDTH + px] = 12;
+    return emptyMap(collision);
+}
+
+/** L-shaped solid corner: horizontal ceiling at wallY, vertical leg at leftX. */
+function mapWithTopLeftLCorner(wallY: number, leftX: number): ParsedMap {
+    const collision = new Uint8Array(MAP_PIXEL_WIDTH * 375);
+    for (let x = leftX; x <= leftX + 40; x++) setWall(collision, x, wallY);
+    for (let y = wallY; y <= wallY + 30; y++) setWall(collision, leftX, y);
+    return emptyMap(collision);
 }
 
 function baseCtx(map: ParsedMap, waterEvent: number): PhysicsContext {
@@ -67,6 +83,31 @@ test("waterEvent=0 respawns at strokeStart (krokkaus victim anchor)", () => {
     assert.ok(ball.stopped, "ball should stop after water respawn");
     assert.equal(ball.x, 310);
     assert.equal(ball.y, 220);
+});
+
+test("vertical wall approach (vx=0) reflects off L-corner ceiling, no wall-clip", () => {
+    // Pre-fix inside-corner suppression cleared top+left whenever (top,tl,left)
+    // were all walls, even with vx=0 vy<0 — the ball phased through the ceiling.
+    // Fix requires velocity into the corner; a straight upward shot must bounce.
+    const wallY = 100;
+    const leftX = 194;
+    const map = mapWithTopLeftLCorner(wallY, leftX);
+    const ball = newBall(200, 130);
+    ball.vx = 0;
+    ball.vy = -6;
+
+    let minY = ball.y;
+    let bounced = false;
+    const ctx = baseCtx(map, 0);
+    for (let i = 0; i < 200 && !ball.stopped; i++) {
+        const prevVy = ball.vy;
+        step(ball, ctx);
+        if (ball.y < minY) minY = ball.y;
+        if (prevVy < 0 && ball.vy > 0) bounced = true;
+    }
+
+    assert.ok(bounced, "ball should reflect off the horizontal wall");
+    assert.ok(minY > wallY, `ball must not phase through ceiling at y=${wallY}, minY=${minY}`);
 });
 
 test("waterEvent=1 respawns at last shore, not strokeStart", () => {
