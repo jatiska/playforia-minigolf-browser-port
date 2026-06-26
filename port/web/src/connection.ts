@@ -105,7 +105,15 @@ export class Connection extends EventTarget {
       // The 'open' event is suppressed during reconnect - the panel doesn't
       // need to redo handshake-bound bookkeeping (it already mounted on the
       // first open). It'll get a 'reconnected' event once `c rcok` lands.
-      if (!this.reconnecting) this.dispatchEvent(new Event("open"));
+      if (this.reconnecting) {
+        // Fresh server socket expects inbound DATA seq 0. The game RAF loop
+        // can still call sendData() the moment isOpen flips true, before
+        // `c rcok` resets counters — zero outSeq here so any slip through the
+        // reconnecting guard can't poison the handshake.
+        this.outSeq = 0;
+      } else {
+        this.dispatchEvent(new Event("open"));
+      }
       this.startKeepalive();
       void ev;
     });
@@ -325,6 +333,13 @@ export class Connection extends EventTarget {
 
   /** Build and send a `d <seq> ...` data packet, incrementing outSeq. */
   sendData(...fields: (string | number | boolean)[]): void {
+    // Suppress game traffic until `c rcok` finishes the handshake. The panel
+    // keeps running (cursor, physics tick) while isOpen is true on the new
+    // socket, but the server rejects any DATA whose seq != 0 on a fresh conn.
+    if (this.reconnecting) {
+      if (DEV) console.debug("[conn] drop sendData during reconnect:", fields[0]);
+      return;
+    }
     const line = buildData(this.outSeq, ...fields);
     this.outSeq++;
     this.send(line);
