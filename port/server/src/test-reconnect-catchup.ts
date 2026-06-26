@@ -96,7 +96,85 @@ async function main(): Promise<void> {
         throw new Error("catchup on track 1 must include `game gametrack 1`");
     }
     console.log("[OK] reconnect catchup includes gametrack on hole 1");
+
+    // Regression: sparse slot ids after mid-game leavers. Survivors can occupy
+    // slots 0 and 3 while players.length is 2. The starttrack buff must stay
+    // numPlayers-wide so the reconnecting client's playStatus gate and scoreboard
+    // align with peers — shrinking to players.length leaves slot 3 off the end.
+    const sparseSent: string[] = [];
+    const sparseConn = {
+        sendDataRaw: (body: string) => {
+            sparseSent.push(body);
+        },
+        sendData: (...fields: (string | number | boolean)[]) => {
+            sparseSent.push(fields.join("\t"));
+        },
+    } as unknown as Connection;
+
+    const sparseCreatorConn = makeMockConn();
+    const sparseSurvivorConn = sparseConn;
+    const sparseCreator = new Player(sparseCreatorConn, 10);
+    const sparseSurvivor = new Player(sparseSurvivorConn, 11);
+    server.addPlayer(sparseCreator);
+    server.addPlayer(sparseSurvivor);
+
+    const sparseGame = new MultiGame(
+        sparseCreator,
+        100,
+        "CatchupSparse",
+        "-",
+        2,
+        0,
+        0,
+        10,
+        60,
+        0,
+        1,
+        0,
+        0,
+        4,
+        tm,
+        false,
+    );
+    if (!sparseGame.addPlayerWithPassword(sparseSurvivor, "-")) {
+        throw new Error("failed to add sparse survivor");
+    }
+    sparseGame.isPublic = false;
+    (sparseGame as unknown as { trackStartedAtMs: number }).trackStartedAtMs = performance.now();
+    (sparseGame as unknown as { currentTrack: number }).currentTrack = 0;
+    (sparseGame as unknown as { playStatus: string }).playStatus = "fppf";
+    (sparseGame as unknown as { playersNumber: number[] }).playersNumber = [0, 3];
+    (sparseGame as unknown as { numberIndex: number }).numberIndex = 4;
+
+    sparseSent.length = 0;
+    sparseGame.sendReconnectResync(sparseSurvivor);
+
+    const sparseStart = sparseSent.find((b) => b.startsWith("game\tstarttrack\t"));
+    if (!sparseStart) {
+        throw new Error("sparse reconnect catchup missing starttrack");
+    }
+    const sparseBuff = sparseStart.split("\t")[2] ?? "";
+    if (sparseBuff.length !== 4) {
+        throw new Error(
+            `sparse reconnect starttrack buff length=${sparseBuff.length}; want 4 (numPlayers)`,
+        );
+    }
+    console.log("[OK] sparse-id reconnect catchup keeps full-width starttrack buff");
+
     process.exit(0);
+}
+
+function makeMockConn(): Connection {
+    const sent: string[] = [];
+    return {
+        sendDataRaw: (body: string) => {
+            sent.push(body);
+        },
+        sendData: (...fields: (string | number | boolean)[]) => {
+            sent.push(fields.join("\t"));
+        },
+        sent,
+    } as unknown as Connection & { sent: string[] };
 }
 
 main().catch((err) => {
