@@ -8,6 +8,7 @@
 // Invoke: node --experimental-strip-types --no-warnings src/test-ballend-sparse-id.ts
 
 import * as path from "node:path";
+import { encodeBallSnapshot, SNAP_FLAG_STOPPED, type BallSnapshotEntry } from "@minigolf/shared";
 import { MultiGame } from "./game.ts";
 import { TrackManager } from "./tracks.ts";
 import { Player } from "./player.ts";
@@ -30,6 +31,40 @@ function mockConn(): Connection {
         },
         sent,
     } as unknown as Connection & { sent: string[] };
+}
+
+function stoppedBall(slot: number, x: number, y: number): BallSnapshotEntry {
+    return {
+        slot,
+        x,
+        y,
+        vx: 0,
+        vy: 0,
+        bounciness: 1,
+        magnetMul: 1,
+        flags: SNAP_FLAG_STOPPED,
+        liquidTimer: 0,
+        iterationsThisStroke: 42,
+        downhillStuckCounter: 0,
+        magnetStuckCounter: 0,
+        spinningStuckCounter: 0,
+        strokeStartX: x,
+        strokeStartY: y,
+        shoreX: x,
+        shoreY: y,
+        seedHex: "0",
+    };
+}
+
+function parseSnapreqNonce(sent: string[]): number | null {
+    for (const line of sent) {
+        if (!line.includes("snapreq")) continue;
+        const idx = line.indexOf("snapreq");
+        const after = line.slice(idx).split("\t");
+        const nonce = parseInt(after[1] ?? "", 10);
+        if (Number.isFinite(nonce)) return nonce;
+    }
+    return null;
 }
 
 async function main(): Promise<void> {
@@ -95,7 +130,27 @@ async function main(): Promise<void> {
         );
     }
 
-    console.log("[OK] ballend accepts sparse slot ids and triggers recovery");
+    const nonce = parseSnapreqNonce(allSent());
+    if (nonce == null) {
+        throw new Error("could not parse nonce from snapreq broadcast");
+    }
+
+    // Both observers agree on slot 3's resting position → snapapply resolves.
+    const blob = encodeBallSnapshot([stoppedBall(3, 150, 200)]);
+    (aConn as Connection & { sent: string[] }).sent.length = 0;
+    (bConn as Connection & { sent: string[] }).sent.length = 0;
+    game.handlePacket(a, ["game", "snap", String(nonce), "0", "0", blob]);
+    game.handlePacket(b, ["game", "snap", String(nonce), "3", "0", blob]);
+
+    const sawSnapapply = allSent().some((line) => line.includes("snapapply"));
+    if (!sawSnapapply) {
+        throw new Error(
+            "expected snapapply after matching snap replies; " +
+                `got broadcasts: ${allSent().join(" | ")}`,
+        );
+    }
+
+    console.log("[OK] ballend accepts sparse slot ids and triggers recovery through snapapply");
 }
 
 main().catch((err) => {
