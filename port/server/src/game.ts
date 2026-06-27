@@ -644,9 +644,9 @@ export class GolfGame extends Game {
         const track = this.tracks[this.currentTrack];
         if (!track) return;
         const stats = this.trackManager.getStats(track);
-        // Width of buff matches existing playStatus length so the client's
-        // numPlayers derivation stays consistent with peers' view.
-        const buff = "f".repeat(Math.max(this.playStatus.length, this.players.length));
+        // Width of buff must match playStatusCapacity (not live headcount) so
+        // sparse slot ids survive reconnect catchup in partially-filled rooms.
+        const buff = "f".repeat(this.playStatusCapacity());
         // Do NOT send `game start` here. Late joiners get that packet because
         // they're mounting the game panel fresh; a reconnecting player still
         // has in-memory hole scores and a track index from before the blip.
