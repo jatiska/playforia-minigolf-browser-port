@@ -96,6 +96,57 @@ async function main(): Promise<void> {
         throw new Error("catchup on track 1 must include `game gametrack 1`");
     }
     console.log("[OK] reconnect catchup includes gametrack on hole 1");
+
+    // 4-seat room with sparse survivors: catchup starttrack buff must stay
+    // numPlayers-wide, not shrink to players.length.
+    const sparseGame = new MultiGame(
+        creator,
+        100,
+        "SparseCatchup",
+        "-",
+        2,
+        0,
+        0,
+        10,
+        60,
+        0,
+        1,
+        0,
+        0,
+        4,
+        tm,
+        false,
+    );
+    sparseGame.isPublic = false;
+    (sparseGame as unknown as { trackStartedAtMs: number }).trackStartedAtMs = performance.now();
+    (sparseGame as unknown as { currentTrack: number }).currentTrack = 0;
+    (sparseGame as unknown as { playStatus: string }).playStatus = "fppf";
+    (sparseGame as unknown as { playersNumber: number[] }).playersNumber = [0, 3];
+    (sparseGame as unknown as { numberIndex: number }).numberIndex = 4;
+
+    sent.length = 0;
+    sparseGame.sendReconnectResync(creator);
+    const startLine = sent.find((b) => b.startsWith("game\tstarttrack\t"));
+    if (!startLine) {
+        throw new Error("sparse catchup missing starttrack");
+    }
+    const buff = startLine.split("\t")[2] ?? "";
+    if (buff.length !== 4) {
+        throw new Error(`sparse catchup starttrack buff width should be 4 (numPlayers), got ${buff.length}: "${buff}"`);
+    }
+    console.log("[OK] reconnect catchup starttrack uses playStatusCapacity for sparse rooms");
+
+    // Match finished while player was in grace: catchup must replay game end.
+    (game as unknown as { currentTrack: number }).currentTrack = 3;
+    sent.length = 0;
+    game.sendReconnectResync(creator);
+    if (!sent.some((b) => b === "game\tend")) {
+        throw new Error("catchup after match end must include `game end`");
+    }
+    if (sent.some((b) => b.startsWith("game\tstarttrack\t"))) {
+        throw new Error("catchup after match end must not send starttrack");
+    }
+    console.log("[OK] reconnect catchup replays game end when match is over");
     process.exit(0);
 }
 
