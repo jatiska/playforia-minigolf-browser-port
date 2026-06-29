@@ -2074,10 +2074,10 @@ export class MultiGame extends GolfGame {
      * the same track. The `advanceTurn` call is a no-op when async or when
      * `nextTrack` already ran (`assignFirstTurn` will have set the new turn).
      */
-    protected override endStroke(player: Player, newPlayStatus: string): void {
+    protected override endStroke(player: Player, newPlayStatus: string, src: "s" | "k" = "s"): void {
         const id = this.getPlayerId(player);
         const wasTrack = this.currentTrack;
-        super.endStroke(player, newPlayStatus);
+        super.endStroke(player, newPlayStatus, src);
         if (this.currentTrack === wasTrack) this.advanceTurn(id);
     }
 

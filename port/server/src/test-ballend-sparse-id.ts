@@ -1,4 +1,5 @@
-// Regression: `ballend` observations must accept sparse slot ids.
+// Regression: `ballend` observations must accept sparse slot ids and complete
+// desync recovery through `snapapply`.
 //
 // Pre-fix: `handleBallEndObservation` rejected `subjectId >= players.length`.
 // After mid-game leavers, survivors can occupy slots 0 and 3 in a 4-seat room
@@ -8,6 +9,7 @@
 // Invoke: node --experimental-strip-types --no-warnings src/test-ballend-sparse-id.ts
 
 import * as path from "node:path";
+import { encodeBallSnapshot, SNAP_FLAG_STOPPED } from "@minigolf/shared";
 import { MultiGame } from "./game.ts";
 import { TrackManager } from "./tracks.ts";
 import { Player } from "./player.ts";
@@ -95,7 +97,50 @@ async function main(): Promise<void> {
         );
     }
 
-    console.log("[OK] ballend accepts sparse slot ids and triggers recovery");
+    const snapreqLine = allSent().find((line) => line.includes("snapreq"));
+    const nonce = parseInt(snapreqLine?.split("\t")[2] ?? "", 10);
+    if (!Number.isFinite(nonce)) {
+        throw new Error(`could not parse snapreq nonce from: ${snapreqLine}`);
+    }
+
+    const blob = encodeBallSnapshot([
+        {
+            slot: 3,
+            x: 150,
+            y: 200,
+            vx: 0,
+            vy: 0,
+            bounciness: 1,
+            magnetMul: 1,
+            flags: SNAP_FLAG_STOPPED,
+            liquidTimer: 0,
+            iterationsThisStroke: 10,
+            downhillStuckCounter: 0,
+            magnetStuckCounter: 0,
+            spinningStuckCounter: 0,
+            strokeStartX: 150,
+            strokeStartY: 200,
+            shoreX: 150,
+            shoreY: 200,
+            seedHex: "0",
+        },
+    ]);
+
+    (aConn as Connection & { sent: string[] }).sent.length = 0;
+    (bConn as Connection & { sent: string[] }).sent.length = 0;
+
+    game.handlePacket(a, ["game", "snap", String(nonce), "0", "0", blob]);
+    game.handlePacket(b, ["game", "snap", String(nonce), "3", "0", blob]);
+
+    const sawSnapapply = allSent().some((line) => line.includes("snapapply"));
+    if (!sawSnapapply) {
+        throw new Error(
+            "expected snapapply after matching snap replies; " +
+                `got broadcasts: ${allSent().join(" | ")}`,
+        );
+    }
+
+    console.log("[OK] ballend accepts sparse slot ids and completes recovery via snapapply");
 }
 
 main().catch((err) => {
