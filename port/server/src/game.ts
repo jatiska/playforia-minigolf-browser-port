@@ -642,11 +642,16 @@ export class GolfGame extends Game {
         const slotId = this.getPlayerId(player);
         if (slotId < 0) return;
         const track = this.tracks[this.currentTrack];
-        if (!track) return;
+        if (!track) {
+            // Match ended while this player was in disconnect-grace — peers
+            // already got `game end` but this socket was dead.
+            player.connection.sendDataRaw(tabularize("game", "end"));
+            return;
+        }
         const stats = this.trackManager.getStats(track);
-        // Width of buff matches existing playStatus length so the client's
-        // numPlayers derivation stays consistent with peers' view.
-        const buff = "f".repeat(Math.max(this.playStatus.length, this.players.length));
+        // Width of buff must match playStatusCapacity (not live headcount) so
+        // sparse slot ids survive reconnect catchup in partially-filled rooms.
+        const buff = "f".repeat(this.playStatusCapacity());
         // Do NOT send `game start` here. Late joiners get that packet because
         // they're mounting the game panel fresh; a reconnecting player still
         // has in-memory hole scores and a track index from before the blip.
